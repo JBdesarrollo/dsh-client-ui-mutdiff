@@ -29,7 +29,7 @@ It reuses the primitives already provided by the Harness shell (`@deepseek-ai/ds
 From your Harness home, add the package with a single command:
 
 ```bash
-dsh plugin --profile web add github:YOUR_USERNAME/dsh-client-ui-mutdiff
+dsh plugin --profile web add github:JBdesarrollo/dsh-client-ui-mutdiff
 ```
 
 If you shared it as a tarball or a local folder, use the path instead:
