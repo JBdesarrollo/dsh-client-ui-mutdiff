@@ -1,0 +1,7 @@
+# Bundle patch for @jbdesarrollo/dsh-client-ui-mutdiff.
+# Applied when the package is added to dsh.profile.bundles (e.g. via
+# `dsh plugin --profile web add <pkg>`). It mounts this plugin as a client
+# plugin entry so the browser is served /plugins/<id>/client.js.
+- insert:
+  - id: client-ui-mutdiff
+    name: '@jbdesarrollo/dsh-client-ui-mutdiff'
