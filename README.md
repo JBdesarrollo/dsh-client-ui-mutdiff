@@ -7,6 +7,7 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) client plu
 By default the Harness collapses every tool row and caps the diff shown in the conversation at 8 lines, so a big edit shows a `…` and you have to click the row (and then hit **Inspect**) to read the real change.
 
 This plugin replaces the `edit` and `write` tool rows with a diff row that:
+
 - **Opens by default** — you don't have to click the row to see the code that changed.
 - **Shows the full diff** — `maxLines: Infinity`, so long before/after hunks are never collapsed mid-file.
 - Keeps everything else intact: the file path link, the running / failed / stopped states, and the **Inspect** button in the details panel.
@@ -15,13 +16,38 @@ It is a small, focused plugin: it only touches the `edit`/`write` toolview. Term
 
 ## How it works
 
-The Harness's `tool.call.toolview` slot is `kind: 'keyed'`. Per its contract, *"a key the shipped composition already covers is replaced, not shared"* — so this plugin registers its own view under the `edit` and `write` keys and takes over those rows, without modifying any shipped package.
+The Harness's `tool.call.toolview` slot is `kind: 'keyed'`, and a keyed slot allows a second registration for the same key at a **different priority** — the lowest priority renders. The shipped file-mutation rows register `edit` and `write` at the default priority `0`, so this plugin registers the same keys at `priority: -1` and takes over those rows without modifying any shipped package.
 
 It reuses the primitives already provided by the Harness shell (`@deepseek-ai/dsh-client-ui-primitives` — `DiffBlock`, `DisclosureRow`, icons) and does **not** pull in new dependencies.
 
+## Compatibility
+
+The Harness client API is still pre-1.0 and **renames things between releases**. This plugin renders through the shipped `tool.call.toolview` slot and the shipped primitives, so it has to track those changes. It is currently verified against both ends of that range:
+
+| DSH version | Status |
+| --- | --- |
+| `0.1.1-rc.2` | supported |
+| `0.1.5-rc.2` (`latest`) | supported |
+| anything else | untested — run `npm test`; the plugin skips itself with a console diagnostic when the primitives no longer match |
+
+`0.1.2` – `0.1.4` are untested: their client packages are no longer published, so that surface could not be inspected.
+
+### What broke in 0.1.5 (fixed in 0.1.2)
+
+Version `0.1.1` of this plugin only worked on `dsh <= 0.1.1-rc.2`. Installing it on a newer Harness produced a browser boot failure (`Failed to load plugins` / `N entries did not activate`) — three independent API changes, each fatal on its own:
+
+| Change in 0.1.2+ | What 0.1.1 did | Symptom |
+| --- | --- | --- |
+| `@deepseek-ai/dsh-client-runtime` was **deleted** (`0.1.1-rc.2` was its last release) | `require("@deepseek-ai/dsh-client-runtime/client")` at factory scope | the client entry cannot materialize: `client-modules: cannot resolve "@deepseek-ai/dsh-client-runtime/client"` |
+| the client cordis service `connection` was renamed to `remote` | declared `inject: ["slots", "connection"]` | the entry parks as `pending` forever, failing the whole boot |
+| `DiffBlock` began **requiring** a `labels` prop and dereferences it unconditionally (`labels.copied`, `labels.files(...)`) | passed only `diffs`/`maxLines`/`className` | `TypeError: Cannot read properties of undefined (reading 'copied')` on every mutation row |
+| the diff card moved off `callView`/`resultView` onto the call args plus `block.meta` | read the lifecycle views | no diff rendered at all (silent regression) |
+
+Version `0.1.2` of this plugin is dual-compatible: it prefers the shipped helper when one exists and falls back to a local equivalent, passes `labels` unconditionally (0.1.1 ignores unknown props), derives the diff from whichever block shape the host provides, declares only the `slots` service, and — most importantly — **skips itself with a console diagnostic instead of failing the client entry** when the primitives no longer match.
+
 ## Requirements
 
-- DeepSeek Harness (`dsh`) — it must be installed (this is a client plugin for the `web` profile).
+- DeepSeek Harness (`dsh`) — this is a client plugin for the `web` profile.
 - `pnpm` on the PATH (the `dsh plugin` command forwards to pnpm in the profile directory).
 
 ## Installation
@@ -35,7 +61,7 @@ dsh plugin --profile web add github:JBdesarrollo/dsh-client-ui-mutdiff
 If you shared it as a tarball or a local folder, use the path instead:
 
 ```bash
-dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.1.0.tgz
+dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.1.2.tgz
 # or
 dsh plugin --profile web add ../your-copy-of/dsh-client-ui-mutdiff
 ```
@@ -63,6 +89,21 @@ It should start with `window.__ModuleLoader__.load({`. Its entry should also app
 
 Then open a session and have the agent `write` or `edit` a file — the diff appears **open** and **complete**.
 
+If the boot fails instead, the browser console names the failing entry. A message mentioning `client-modules:` means the module graph rejected the bundle (a DSH API rename); a message mentioning `did not activate` means the entry itself failed: `import failed` for a module-resolution problem, or `pending (waiting for services: …)` for a service rename.
+
+## Development
+
+```bash
+npm install
+npm test
+```
+
+`test/run.mjs` boots `lib/client.js` inside a stub module loader twice — once against the `0.1.1-rc.2` client surface and once against the `0.1.5-rc.2` one — asserts that the two keys are registered at a shadowing priority, and renders real rows (settled / running / errored, both block shapes) through React to check that the diff is expanded by default, untruncated, and given the props each version's primitives expect. Pass a path to test another build:
+
+```bash
+node test/run.mjs /path/to/other/client.js
+```
+
 ## Files
 
 ```
@@ -70,6 +111,7 @@ package.json        # dsh.bundle + dsh.client declaration
 cordis.patch.yml    # mounts the plugin as a client entry
 lib/index.js        # no-op host loader entry
 lib/client.js       # the browser bundle: diff row, expanded by default, maxLines: Infinity
+test/run.mjs        # client-API compatibility suite (not published)
 ```
 
 ## License
