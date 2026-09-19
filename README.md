@@ -9,8 +9,9 @@ By default the Harness collapses every tool row and caps the diff shown in the c
 This plugin replaces the `edit` and `write` tool rows with a diff row that:
 
 - **Opens by default** — you don't have to click the row to see the code that changed.
+- **Colours the code** — the changed lines are syntax-highlighted with the same grammar as the file's language, instead of being flat monochrome text.
 - **Shows the full diff** — `maxLines: Infinity`, so long before/after hunks are never collapsed mid-file.
-- Keeps everything else intact: the file path link, the running / failed / stopped states, and the **Inspect** button in the details panel.
+- Keeps everything else intact: the file path link, the `+A -R` badge, the running / failed / stopped states, a copy action, and the **Inspect** button in the details panel.
 
 It is a small, focused plugin: it only touches the `edit`/`write` toolview. Terminal, read, search, and web rows keep their stock behavior.
 
@@ -18,7 +19,21 @@ It is a small, focused plugin: it only touches the `edit`/`write` toolview. Term
 
 The Harness's `tool.call.toolview` slot is `kind: 'keyed'`, and a keyed slot allows a second registration for the same key at a **different priority** — the lowest priority renders. The shipped file-mutation rows register `edit` and `write` at the default priority `0`, so this plugin registers the same keys at `priority: -1` and takes over those rows without modifying any shipped package.
 
-It reuses the primitives already provided by the Harness shell (`@deepseek-ai/dsh-client-ui-primitives` — `DiffBlock`, `DisclosureRow`, icons) and does **not** pull in new dependencies.
+It reuses the primitives already provided by the Harness shell (`@deepseek-ai/dsh-client-ui-primitives` — `CodeBlock`, `DiffBlock`, `DisclosureRow`, icons) and does **not** pull in new dependencies.
+
+## Syntax highlighting
+
+No highlighter is bundled and none is needed: **the Harness shell already ships one**. It contains [shiki](https://shiki.style) with VS Code's TextMate grammars, its own light/dark token palette, and on-demand grammar loading:
+
+- `typescript`, `shellscript` and `json` are preloaded; ~22 more (python, go, rust, java, c, cpp, csharp, kotlin, swift, php, yaml, toml, ini, markdown, html, css, scss, less, sql, xml, lua) load on demand.
+- The palette is the `--shiki-token-*` custom properties that `@deepseek-ai/dsh-client-ui-theme` defines for both themes, so highlighted diffs follow the active DSH theme automatically.
+- A file's language is derived from the hunk path extension; an unknown or absent extension falls back to plain text.
+
+The shell's `ReadBlock` (read rows) and `CodeBlock` (markdown fences, `run_code`) already tokenize through shiki — **`DiffBlock` is the one code surface that does not**, so it renders plain text. This plugin therefore builds the diff card itself, out of the exported `CodeBlock` primitive, one highlighted block per side, keeping the shipped layout: a path header, every removed line, then every added line. The `+`/`-` prefixes are drawn by CSS on the highlighted lines, so they survive tokenization, and each side also carries a tint and a coloured left border — which keeps the direction readable when a file has no grammar at all.
+
+If the shell ever stops exposing `CodeBlock`, the plugin falls back to the shipped `DiffBlock` (plain, still expanded and untruncated) rather than failing.
+
+See `docs/upstream-diffblock-lang.md` for why the durable fix belongs upstream in `DiffBlock`.
 
 ## Compatibility
 
@@ -61,7 +76,7 @@ dsh plugin --profile web add github:JBdesarrollo/dsh-client-ui-mutdiff
 If you shared it as a tarball or a local folder, use the path instead:
 
 ```bash
-dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.1.2.tgz
+dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.2.0.tgz
 # or
 dsh plugin --profile web add ../your-copy-of/dsh-client-ui-mutdiff
 ```
@@ -98,11 +113,13 @@ npm install
 npm test
 ```
 
-`test/run.mjs` boots `lib/client.js` inside a stub module loader twice — once against the `0.1.1-rc.2` client surface and once against the `0.1.5-rc.2` one — asserts that the two keys are registered at a shadowing priority, and renders real rows (settled / running / errored, both block shapes) through React to check that the diff is expanded by default, untruncated, and given the props each version's primitives expect. Pass a path to test another build:
+`test/run.mjs` boots `lib/client.js` inside a stub module loader twice — once against the `0.1.1-rc.2` client surface and once against the `0.1.5-rc.2` one — asserts that the two keys are registered at a shadowing priority, and renders real rows (settled / running / errored, both block shapes) through React. Five scenarios cover the two client surfaces, the highlighted diff, the plain `DiffBlock` fallback, the fail-soft skip when no diff renderer is exposed, and the integrity of the injected stylesheet. Pass a path to test another build (it must live in a package with `"type": "module"`, since the harness re-imports it per scenario):
 
 ```bash
 node test/run.mjs /path/to/other/client.js
 ```
+
+Scenario E deserves a note: the bundle carries its CSS as one long JavaScript string literal. A stray unescaped quote in it ends the literal early — the module still parses, the markup is unchanged, and the browser silently receives a truncated stylesheet, so nothing but a check on the stylesheet itself catches it.
 
 ## Files
 
@@ -110,8 +127,9 @@ node test/run.mjs /path/to/other/client.js
 package.json        # dsh.bundle + dsh.client declaration
 cordis.patch.yml    # mounts the plugin as a client entry
 lib/index.js        # no-op host loader entry
-lib/client.js       # the browser bundle: diff row, expanded by default, maxLines: Infinity
+lib/client.js       # the browser bundle: highlighted diff row, expanded by default
 test/run.mjs        # client-API compatibility suite (not published)
+docs/               # upstream notes (not published)
 ```
 
 ## License
