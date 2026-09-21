@@ -1,6 +1,6 @@
 # dsh-client-ui-mutdiff
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) client plugin that makes file `write` / `edit` tool diffs render **already expanded** and **not truncated** in the agent chat.
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) client plugin that makes file `write` / `edit` tool diffs render **already expanded** and **not truncated** in the agent chat — and can open the file being edited in **your own editor**, at the line that changed, so the code is on another screen while the agent works.
 
 ## What it does
 
@@ -11,15 +11,102 @@ This plugin replaces the `edit` and `write` tool rows with a diff row that:
 - **Opens by default** — you don't have to click the row to see the code that changed.
 - **Colours the code** — the changed lines are syntax-highlighted with the same grammar as the file's language, instead of being flat monochrome text.
 - **Shows the full diff** — `maxLines: Infinity`, so long before/after hunks are never collapsed mid-file.
+- **Opens in your editor** — one click, or a switch, sends the file to VS Code, Cursor, Windsurf, Zed, Sublime or anything else with a CLI, with the caret on the first line that changed. See [Open in editor](#open-in-editor).
 - Keeps everything else intact: the file path link, the `+A -R` badge, the running / failed / stopped states, a copy action, and the **Inspect** button in the details panel.
 
 It is a small, focused plugin: it only touches the `edit`/`write` toolview. Terminal, read, search, and web rows keep their stock behavior.
 
+## Open in editor
+
+DSH can already hand a file to the operating system — clicking a path in any tool row calls `host.openPath`, which resolves to `xdg-open`, `open`, or, under WSL, `wslpath -w` + `Invoke-Item`. That opens **the default application for that file type**, with no say in which editor it is and no way to ask for a line. This plugin adds the missing half: a button that opens the file in *your* editor, at the line the mutation changed.
+
+Every `edit` / `write` row now carries an action beside **Inspect**:
+
+- **Open in editor** — launches your editor's CLI on that file, caret on the first added line.
+- **▾** — a picker with the editors this host can actually launch, and an **Open every edited file automatically** switch.
+
+Clicking runs `code -r -g <file>:<line>` (or the equivalent for your editor). `-r` reuses the last active window, so a session's edits collect as **tabs in one window** instead of spawning window after window, and `-g` puts the caret on the change. Under WSL the `code` shim attaches to the WSL remote, so the file opens as a WSL file rather than a `\\wsl.localhost\` UNC path. The editor picks up later writes on its own — that is the "live on the other screen" part — and auto-open re-focuses the file for each new mutation.
+
+### Editors
+
+Detection is a PATH scan over this table, in order; the configured editor is offered first, and the first match wins:
+
+| id | editor | arguments |
+| --- | --- | --- |
+| `code` | VS Code | `-r -g <file>:<line>` |
+| `code-insiders`, `cursor`, `windsurf`, `antigravity`, `trae`, `codium` | the VS Code family | same |
+| `zed` | Zed | `<file>:<line>` |
+| `subl` | Sublime Text | `-a <file>:<line>` |
+| anything else | a command you configure | `<file>`, or your own `openArgs` |
+
+### Configuration
+
+The host half reads its config from the row, so a profile's patch layer can set a machine-wide default that survives restarts — in `~/.dsh/profiles/web/cordis.patch.yml`:
+
+```yaml
+- id: client-ui-mutdiff
+  config:
+    autoOpen: true       # open every successful edit/write without a click (default: false)
+    editor: code         # auto | an id above | a command resolved on the PATH
+    gotoLine: true       # false opens the file without a line (default: true)
+    roots: []            # extra directories an openable file may live under
+    openArgs: []         # e.g. ['--line', '{line}', '{file}'] for an editor not in the table
+```
+
+The per-browser picker overrides `editor` and `autoOpen` for the browser it was set in, and is remembered in `localStorage`; the config is the default it starts from.
+
+Because that is an ordinary patch entry, `dsh web --patch <file>` turns a one-file overlay into a flag:
+
+```bash
+cat > ~/.dsh/code-mode.yml <<'YAML'
+- id: client-ui-mutdiff
+  config: { autoOpen: true, editor: code }
+YAML
+alias dsh-code='dsh web --patch ~/.dsh/code-mode.yml'
+```
+
+### Why not `dsh web --code`
+
+A plugin cannot add a flag to `dsh web`, and this is a deliberate contract rather than an omission: the launcher hands everything after its own flags to the profile's tree verbatim so the app owns its flag family, and the app's parser (`dsh-web-app/startup`) declares exactly `--host`, `--port`, `--trusted-host` and `--no-open`. An undeclared `--code` is an `unknown option` grammar error before any plugin loads, so no plugin can claim it. The patch-layer config above, or the alias that feeds it, is the same preference in the one place a plugin may put it.
+
 ## How it works
+
+### The diff row
 
 The Harness's `tool.call.toolview` slot is `kind: 'keyed'`, and a keyed slot allows a second registration for the same key at a **different priority** — the lowest priority renders. The shipped file-mutation rows register `edit` and `write` at the default priority `0`, so this plugin registers the same keys at `priority: -1` and takes over those rows without modifying any shipped package.
 
-It reuses the primitives already provided by the Harness shell (`@deepseek-ai/dsh-client-ui-primitives` — `CodeBlock`, `DiffBlock`, `DisclosureRow`, icons) and does **not** pull in new dependencies.
+It reuses the primitives already provided by the Harness shell (`@deepseek-ai/dsh-client-ui-primitives` — `CodeBlock`, `DiffBlock`, `DisclosureRow`, icons) and does **not** pull in new dependencies. The editor action is the one part that cannot live in the browser, and it is the host entry's job.
+
+### The editor bridge
+
+The browser cannot launch a process, and no shipped client-reachable host capability can name an editor: `host.openPath` means "the default application", and the text-editor intent that does exist (`open -t`) is host-internal, reachable only from pathless `settings.openDocument` / `agentPreset.openDocument`. So `lib/index.js` — a no-op host entry until 0.3.0 — registers one HTTP route on the composed web server and spawns the editor's shim in the host process. That is the same kind of host-side action `dsh web` performs when it hands its URL to your browser, and it is the only mechanism open to a third-party plugin here: the `/api` RPC bridge is a fixed, generated capability set whose single interceptor seat belongs to the API gateway.
+
+| route | body | answer |
+| --- | --- | --- |
+| `GET /mutdiff/state` | — | `{ok, editors: [{id, label}], effective, autoOpen, gotoLine}` |
+| `POST /mutdiff/open` | `{path, hint, editor?}` | `{ok: true, editor, line}` or `{ok: false, reason}` |
+
+The browser never names a program: the host picks the executable from its own table, so the payload cannot become an arbitrary command runner. The file itself is constrained too — absolute (with `~` expanded), free of control characters, an existing regular file after `realpath`, and, whenever any root is known, inside a registered workspace or a configured `roots` entry.
+
+**The line.** DSH's recorded diff carries no line numbers (`FileDiff` is a path plus before/after text), so the browser sends the first line the mutation *added* and the host finds it in the file on disk; with no match, or for a file too large to scan, the file opens at the top. A `write` has nothing to compare against, so it uses its first non-empty line. If the same line appears earlier in the file, the caret lands on that earlier copy — the file is still the right one.
+
+**Why a hint instead of a line number.** A tool row must render the moment its block arrives, and for a running call the change is not on disk yet; resolving the hint host-side at click (or settle) time is what makes the line correct even when the file was rewritten in between.
+
+### Security
+
+The route spawns a process, so it is fenced the way DSH fences its own privileged methods, for the same two reasons — a DNS-rebinding page whose `Host` names the attacker's domain while the socket reaches this server, and a cross-site request fired from a malicious page. The fence requires a loopback `Host`, no `sec-fetch-site: cross-site`, a same-origin `Origin` when the browser attaches one, and `content-type: application/json` (the one request shape a browser sends without a preflight is a form post, and a form cannot produce that type). Anything else gets a 403 before a path is even parsed.
+
+Consequently the action is **loopback-only**: a browser reaching this harness over the LAN sees no button, exactly as it cannot use `host.openPath`. A file-open request is also deduplicated within 700 ms, so a double click opens one window.
+
+### When the bridge is absent
+
+Everything above is additive. If there is no web server (a headless profile), the service was renamed, or the host half is simply older than the browser half, the state read fails once, a single diagnostic is logged to the browser console, the action is not rendered, and DSH's own file link (the default-application opener) keeps working. The diff row itself renders exactly as before.
+
+### Caveats
+
+- **Auto-open raises the editor window.** Launching an editor from a CLI focuses it, so with auto-open on, every edit brings VS Code to the front — which is the point when that window is on your second screen, and an interruption when it is not. That is why it is off by default.
+- **Auto-open fires on settled mutations only**, once per call and only on success: a failed or interrupted mutation opens nothing, and a `write` that is still running has no file on disk yet.
+- **`-r` is a preference, not a lock.** If VS Code's own window settings route the file elsewhere, its CLI honors them; `openArgs` overrides the whole argument vector when you need something else.
 
 ## Syntax highlighting
 
@@ -47,6 +134,8 @@ The Harness client API is still pre-1.0 and **renames things between releases**.
 
 `0.1.2` – `0.1.4` are untested: their client packages are no longer published, so that surface could not be inspected.
 
+The editor bridge rides the host side, so it has its own compatibility edge: it needs the `webServer` service, which it requests with the scoped-inject form rather than a declared dependency. On a build where that service is missing or renamed, the route is never registered and the browser half hides the action — neither half fails a boot. Only `0.1.1-rc.2` has been exercised live.
+
 ### What broke in 0.1.5 (fixed in 0.1.2)
 
 Version `0.1.1` of this plugin only worked on `dsh <= 0.1.1-rc.2`. Installing it on a newer Harness produced a browser boot failure (`Failed to load plugins` / `N entries did not activate`) — three independent API changes, each fatal on its own:
@@ -62,8 +151,9 @@ Version `0.1.2` of this plugin is dual-compatible: it prefers the shipped helper
 
 ## Requirements
 
-- DeepSeek Harness (`dsh`) — this is a client plugin for the `web` profile.
+- DeepSeek Harness (`dsh`) — this is a plugin for the `web` profile. The diff row needs the browser surface; the editor bridge additionally needs the composed web server (`ctx.webServer`, shipped by `@deepseek-ai/dsh-host-webserver` in the `web` bundle).
 - `pnpm` on the PATH (the `dsh plugin` command forwards to pnpm in the profile directory).
+- An editor with a CLI on the PATH (`code`, `cursor`, `windsurf`, `zed`, `subl`, …) for the editor action. Without one the action does not render and the file link still opens with the system default application.
 
 ## Installation
 
@@ -76,7 +166,7 @@ dsh plugin --profile web add github:JBdesarrollo/dsh-client-ui-mutdiff
 If you shared it as a tarball or a local folder, use the path instead:
 
 ```bash
-dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.2.0.tgz
+dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.3.0.tgz
 # or
 dsh plugin --profile web add ../your-copy-of/dsh-client-ui-mutdiff
 ```
@@ -104,6 +194,20 @@ It should start with `window.__ModuleLoader__.load({`. Its entry should also app
 
 Then open a session and have the agent `write` or `edit` a file — the diff appears **open** and **complete**.
 
+For the editor bridge, the host route should answer, and the host log should name the editors it found:
+
+```bash
+curl -s http://127.0.0.1:3080/mutdiff/state
+# {"ok":true,"autoOpen":false,"gotoLine":true,"configured":"auto","effective":"code","editors":[{"id":"code","label":"VS Code"}]}
+
+curl -s -X POST http://127.0.0.1:3080/mutdiff/open \
+  -H 'content-type: application/json' \
+  -d "{\"path\":\"$PWD/README.md\",\"hint\":\"## Verify\"}"
+# {"ok":true,"editor":"code","line":182,"args":["-r","-g",".../README.md:182"]}
+```
+
+`dsh web` also logs `[dsh-client-ui-mutdiff] open-in-editor bridge ready: code (/path/to/code)` once the route is up, and warns when no editor CLI was found. A `no-editor` or `outside-workspace` answer names its own reason in the row's action bar.
+
 If the boot fails instead, the browser console names the failing entry. A message mentioning `client-modules:` means the module graph rejected the bundle (a DSH API rename); a message mentioning `did not activate` means the entry itself failed: `import failed` for a module-resolution problem, or `pending (waiting for services: …)` for a service rename.
 
 ## Development
@@ -113,22 +217,24 @@ npm install
 npm test
 ```
 
-`test/run.mjs` boots `lib/client.js` inside a stub module loader twice — once against the `0.1.1-rc.2` client surface and once against the `0.1.5-rc.2` one — asserts that the two keys are registered at a shadowing priority, and renders real rows (settled / running / errored, both block shapes) through React. Five scenarios cover the two client surfaces, the highlighted diff, the plain `DiffBlock` fallback, the fail-soft skip when no diff renderer is exposed, and the integrity of the injected stylesheet. Pass a path to test another build (it must live in a package with `"type": "module"`, since the harness re-imports it per scenario):
+`test/run.mjs` boots `lib/client.js` inside a stub module loader twice — once against the `0.1.1-rc.2` client surface and once against the `0.1.5-rc.2` one — asserts that the two keys are registered at a shadowing priority, and renders real rows (settled / running / errored, both block shapes) through React. Ten scenarios cover the two client surfaces, the highlighted diff, the plain `DiffBlock` fallback, the fail-soft skip when no diff renderer is exposed, the integrity of the injected stylesheet, the editor action and the payload it posts (clicked through recorded jsx props, since the harness has no DOM), the auto-open decision, and the host half — route registration, PATH detection, path and hint validation, the fence, the body contract and a real HTTP round trip, all through injectable seams so no editor is installed and nothing is spawned. When `@deepseek-ai/cordis` resolves (it does from inside a DSH profile tree), a final scenario drives the host row on a real cordis context and asserts the route arrives through scoped injection — including for a web server composed *after* the row; otherwise it prints a skip line. Pass a path to test another build (it must live in a package with `"type": "module"`, since the harness re-imports it per scenario):
 
 ```bash
 node test/run.mjs /path/to/other/client.js
 ```
 
-Scenario E deserves a note: the bundle carries its CSS as one long JavaScript string literal. A stray unescaped quote in it ends the literal early — the module still parses, the markup is unchanged, and the browser silently receives a truncated stylesheet, so nothing but a check on the stylesheet itself catches it.
+Scenario E deserves a note: the bundle carries its CSS as one long JavaScript string literal. A stray unescaped quote in it ends the literal early — the module still parses, the markup is unchanged, and the browser silently receives a truncated stylesheet, so nothing but a check on the stylesheet itself catches it. It also fails when a rendered row uses a class the stylesheet does not define, which is why every new action class needs a rule.
+
+Two limits are deliberate. The harness renders static markup, so effects never run: the three-line effect that turns an auto-open plan into a request is covered by reading, not by a scenario, and the picker's open/closed markup is covered by its rules and labels rather than by a click. And a scenario that spawns an editor would depend on the machine, so the host half is driven through the `detect`/`launch`/`roots` seams instead — `node test/run.mjs` is honest about what it does not exercise.
 
 ## Files
 
 ```
 package.json        # dsh.bundle + dsh.client declaration
-cordis.patch.yml    # mounts the plugin as a client entry
-lib/index.js        # no-op host loader entry
-lib/client.js       # the browser bundle: highlighted diff row, expanded by default
-test/run.mjs        # client-API compatibility suite (not published)
+cordis.patch.yml    # mounts the plugin as a client entry (both halves ride one row)
+lib/index.js        # the host half: editor detection + the fenced /mutdiff route
+lib/client.js       # the browser bundle: highlighted diff row and the editor action
+test/run.mjs        # compatibility + contract suite (not published)
 docs/               # upstream notes (not published)
 ```
 
