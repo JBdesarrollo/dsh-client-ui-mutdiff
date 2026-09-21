@@ -43,13 +43,21 @@ Detection is a PATH scan over this table, in order; the configured editor is off
 
 ### Turning it on for one run
 
-Naming an environment variable on the invocation **is** the opt-in. It touches no file, applies to that process only, and the next plain `dsh web` is back to the manual button:
+Naming one word on the invocation **is** the opt-in. It touches no file, applies to that process only, and the next plain `dsh web` is back to the manual button:
 
 ```bash
-MUTDIFF_AUTO_OPEN=1 dsh web                          # open every successful edit/write
-MUTDIFF_EDITOR=windsurf dsh web                      # pick the editor for this run
-MUTDIFF_AUTO_OPEN=1 MUTDIFF_EDITOR=code dsh web  # both
-MUTDIFF_GOTO_LINE=0 dsh web                          # open the file, don't jump to the change
+MUTDIFF=code dsh web      # open every successful edit/write in VS Code
+MUTDIFF=1 dsh web         # same, with whichever editor is detected
+MUTDIFF=windsurf dsh web  # or that one
+MUTDIFF=0 dsh web         # explicitly off, whatever else is configured
+```
+
+The spelled-out form is there when a field needs to be precise, and any of it overrides the word:
+
+```bash
+MUTDIFF_EDITOR=zed dsh web          # the editor for this run
+MUTDIFF_AUTO_OPEN=1 dsh web         # the automatic mode on its own
+MUTDIFF_GOTO_LINE=0 dsh web         # open the file without jumping to the change
 ```
 
 An alias gives you a flag of your own:
@@ -60,6 +68,7 @@ alias dsh-code='MUTDIFF_AUTO_OPEN=1 MUTDIFF_EDITOR=code dsh web'
 
 | variable | values | effect |
 | --- | --- | --- |
+| `MUTDIFF` | an editor id or command → that editor, automatic mode on; `1`/`true`/`on`/`auto` → detected editor, automatic mode on; `0`/`false`/`no`/`off` → off | the one-word form |
 | `MUTDIFF_AUTO_OPEN` | `1`/`true`/anything present → on; `0`, `false`, `no`, `off`, empty → off | open every settled, successful mutation without a click |
 | `MUTDIFF_EDITOR` | an id from the table above, or a command on the PATH | the editor this run prefers |
 | `MUTDIFF_GOTO_LINE` | as above | whether to jump to the first changed line |
@@ -188,7 +197,7 @@ dsh plugin --profile web add github:JBdesarrollo/dsh-client-ui-mutdiff
 If you shared it as a tarball or a local folder, use the path instead:
 
 ```bash
-dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.3.2.tgz
+dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.3.3.tgz
 # or
 dsh plugin --profile web add ../your-copy-of/dsh-client-ui-mutdiff
 ```

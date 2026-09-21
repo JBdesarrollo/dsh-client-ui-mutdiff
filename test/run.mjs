@@ -882,7 +882,8 @@ async function scenarioHostRoute() {
 		gotoLine: true,
 		roots: [],
 		openArgs: [],
-		sources: { editor: "default", autoOpen: "default", gotoLine: "default" }
+		sources: { editor: "default", autoOpen: "default", gotoLine: "default" },
+		autoOpenVariable: null
 	});
 	assert.equal(host.normalizeConfig({ editor: "   " }, none).editor, "auto", "a blank editor falls back to auto");
 	assert.equal(host.normalizeConfig({ autoOpen: "yes" }, none).autoOpen, false, "only a real boolean turns auto-open on");
@@ -896,6 +897,21 @@ async function scenarioHostRoute() {
 	assert.equal(invoked.editor, "windsurf");
 	assert.equal(invoked.gotoLine, false, "MUTDIFF_GOTO_LINE=0 asks for no line jump");
 	assert.deepEqual(invoked.sources, { editor: "env", autoOpen: "env", gotoLine: "env" });
+	// the one-word form: naming MUTDIFF at all is the request
+	const word = (value) => host.normalizeConfig(undefined, { MUTDIFF: value });
+	assert.equal(word("code").editor, "code", "MUTDIFF=code names the editor");
+	assert.equal(word("code").autoOpen, true, "and asks for the automatic mode in the same word");
+	assert.equal(word("code").autoOpenVariable, "MUTDIFF", "the picker is told which word pinned it");
+	assert.equal(word("1").editor, "auto", "MUTDIFF=1 keeps the auto-detected editor");
+	assert.equal(word("on").autoOpen, true);
+	assert.equal(word("0").autoOpen, false, "MUTDIFF=0 turns the automatic mode off explicitly");
+	assert.equal(word("0").autoOpenVariable, "MUTDIFF");
+	assert.equal(word("/opt/editors/mine --wait").editor, "/opt/editors/mine --wait", "any other word is read as the editor, command path included");
+	assert.equal(host.normalizeConfig(undefined, {}).autoOpen, false, "no word, no automatic mode");
+	assert.equal(host.normalizeConfig(undefined, {}).autoOpenVariable, null);
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF: "code", MUTDIFF_EDITOR: "zed" }).editor, "zed", "the spelled-out variable wins over the word");
+	assert.equal(host.normalizeConfig({ autoOpen: true }, { MUTDIFF: "0" }).autoOpen, false, "and the word wins over a row default");
+
 	for (const falsey of ["0", "false", "no", "off", ""]) {
 		assert.equal(host.normalizeConfig(undefined, { MUTDIFF_AUTO_OPEN: falsey }).autoOpen, false, `"${falsey}" means off`);
 	}

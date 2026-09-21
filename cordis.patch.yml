@@ -9,8 +9,9 @@
 # For one run, name an environment variable on the invocation — no file is
 # touched by anyone:
 #
-#   MUTDIFF_AUTO_OPEN=1 dsh web
-#   MUTDIFF_EDITOR=code MUTDIFF_AUTO_OPEN=1 dsh web
+#   MUTDIFF=code dsh web        (VS Code, automatic mode on)
+#   MUTDIFF=1 dsh web           (detected editor, automatic mode on)
+#   MUTDIFF_EDITOR=zed dsh web  (a precise field, spelled out)
 #   MUTDIFF_GOTO_LINE=0 dsh web
 #
 # This patch layer is only for a durable default, and it is your file to edit
