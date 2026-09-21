@@ -25,6 +25,8 @@ Every `edit` / `write` row now carries an action beside **Inspect**:
 - **Open in editor** — launches your editor's CLI on that file, caret on the first added line.
 - **▾** — a picker with the editors this host can actually launch, and an **Open every edited file automatically** switch.
 
+Nothing is on by default and nothing is configured in a file: the button is there, auto-open is off, and one environment variable on the invocation turns the automatic mode on — see [Turning it on for one run](#turning-it-on-for-one-run).
+
 Clicking runs `code -r -g <file>:<line>` (or the equivalent for your editor). `-r` reuses the last active window, so a session's edits collect as **tabs in one window** instead of spawning window after window, and `-g` puts the caret on the change. Under WSL the `code` shim attaches to the WSL remote, so the file opens as a WSL file rather than a `\\wsl.localhost\` UNC path. The editor picks up later writes on its own — that is the "live on the other screen" part — and auto-open re-focuses the file for each new mutation.
 
 ### Editors
@@ -39,35 +41,53 @@ Detection is a PATH scan over this table, in order; the configured editor is off
 | `subl` | Sublime Text | `-a <file>:<line>` |
 | anything else | a command you configure | `<file>`, or your own `openArgs` |
 
-### Configuration
+### Turning it on for one run
 
-The host half reads its config from the row, so a profile's patch layer can set a machine-wide default that survives restarts — in `~/.dsh/profiles/web/cordis.patch.yml`:
+Naming an environment variable on the invocation **is** the opt-in. It touches no file, applies to that process only, and the next plain `dsh web` is back to the manual button:
+
+```bash
+DSH_MUTDIFF_AUTO_OPEN=1 dsh web                          # open every successful edit/write
+DSH_MUTDIFF_EDITOR=windsurf dsh web                      # pick the editor for this run
+DSH_MUTDIFF_AUTO_OPEN=1 DSH_MUTDIFF_EDITOR=code dsh web  # both
+DSH_MUTDIFF_GOTO_LINE=0 dsh web                          # open the file, don't jump to the change
+```
+
+An alias gives you a flag of your own:
+
+```bash
+alias dsh-code='DSH_MUTDIFF_AUTO_OPEN=1 DSH_MUTDIFF_EDITOR=code dsh web'
+```
+
+| variable | values | effect |
+| --- | --- | --- |
+| `DSH_MUTDIFF_AUTO_OPEN` | `1`/`true`/anything present → on; `0`, `false`, `no`, `off`, empty → off | open every settled, successful mutation without a click |
+| `DSH_MUTDIFF_EDITOR` | an id from the table above, or a command on the PATH | the editor this run prefers |
+| `DSH_MUTDIFF_GOTO_LINE` | as above | whether to jump to the first changed line |
+
+The naming follows the harness's own invocation-time capability variables (`$DSH_WEB_SEARCH_PROVIDER`, `$BROWSER`). Naming one is the deliberate act for that process, so it **outranks a preference stored in the browser**: while a variable pins auto-open, the picker shows the pinned value, says which variable did it, and refuses to toggle — rather than offering a switch that silently loses. The editor picker keeps working regardless, because a chosen editor rides each open request.
+
+### A durable default (optional, and yours to write)
+
+If you would rather not type the variable every time, put it in **your** patch layer — `~/.dsh/profiles/web/cordis.patch.yml`, the same file you already use for other overrides:
 
 ```yaml
 - id: client-ui-mutdiff
+  name: '@jbdesarrollo/dsh-client-ui-mutdiff'   # optional assertion: a mismatched id is skipped, not misconfigured
   config:
-    autoOpen: true       # open every successful edit/write without a click (default: false)
+    autoOpen: true       # default: false
     editor: code         # auto | an id above | a command resolved on the PATH
-    gotoLine: true       # false opens the file without a line (default: true)
+    gotoLine: true       # default: true
     roots: []            # extra directories an openable file may live under
     openArgs: []         # e.g. ['--line', '{line}', '{file}'] for an editor not in the table
 ```
 
-The per-browser picker overrides `editor` and `autoOpen` for the browser it was set in, and is remembered in `localStorage`; the config is the default it starts from.
+**The plugin reads that config and never writes it.** In fact the whole package contains no filesystem write call: the host half scans the PATH, reads the file (to resolve the line hint), registers one HTTP route, and spawns the editor — nothing else, in any directory. Its only durable state is the browser preference the picker keeps in `localStorage`, which belongs to the reader's browser, not to your checkout.
 
-Because that is an ordinary patch entry, `dsh web --patch <file>` turns a one-file overlay into a flag:
-
-```bash
-cat > ~/.dsh/code-mode.yml <<'YAML'
-- id: client-ui-mutdiff
-  config: { autoOpen: true, editor: code }
-YAML
-alias dsh-code='dsh web --patch ~/.dsh/code-mode.yml'
-```
+An id that is not installed is a warning, not a failure: DSH reports `patch: entry ... not found` and boots without it, so this block can be added before or after the plugin itself.
 
 ### Why not `dsh web --code`
 
-A plugin cannot add a flag to `dsh web`, and this is a deliberate contract rather than an omission: the launcher hands everything after its own flags to the profile's tree verbatim so the app owns its flag family, and the app's parser (`dsh-web-app/startup`) declares exactly `--host`, `--port`, `--trusted-host` and `--no-open`. An undeclared `--code` is an `unknown option` grammar error before any plugin loads, so no plugin can claim it. The patch-layer config above, or the alias that feeds it, is the same preference in the one place a plugin may put it.
+A plugin cannot add a flag to `dsh web`, and that is a deliberate contract rather than an omission: the launcher hands everything after its own flags to the profile's tree verbatim so the app owns its flag family, and the app's parser (`dsh-web-app/startup`) declares exactly `--host`, `--port`, `--trusted-host` and `--no-open`. An undeclared `--code` is an `unknown option` grammar error before any plugin loads, so no plugin can claim it. An environment variable is the same "only this invocation" intent in the one place a plugin may put it — and unlike a flag it needs no change to any shipped package.
 
 ## How it works
 
@@ -166,7 +186,7 @@ dsh plugin --profile web add github:JBdesarrollo/dsh-client-ui-mutdiff
 If you shared it as a tarball or a local folder, use the path instead:
 
 ```bash
-dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.3.0.tgz
+dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.3.1.tgz
 # or
 dsh plugin --profile web add ../your-copy-of/dsh-client-ui-mutdiff
 ```
@@ -217,7 +237,7 @@ npm install
 npm test
 ```
 
-`test/run.mjs` boots `lib/client.js` inside a stub module loader twice — once against the `0.1.1-rc.2` client surface and once against the `0.1.5-rc.2` one — asserts that the two keys are registered at a shadowing priority, and renders real rows (settled / running / errored, both block shapes) through React. Ten scenarios cover the two client surfaces, the highlighted diff, the plain `DiffBlock` fallback, the fail-soft skip when no diff renderer is exposed, the integrity of the injected stylesheet, the editor action and the payload it posts (clicked through recorded jsx props, since the harness has no DOM), the auto-open decision, and the host half — route registration, PATH detection, path and hint validation, the fence, the body contract and a real HTTP round trip, all through injectable seams so no editor is installed and nothing is spawned. When `@deepseek-ai/cordis` resolves (it does from inside a DSH profile tree), a final scenario drives the host row on a real cordis context and asserts the route arrives through scoped injection — including for a web server composed *after* the row; otherwise it prints a skip line. Pass a path to test another build (it must live in a package with `"type": "module"`, since the harness re-imports it per scenario):
+`test/run.mjs` boots `lib/client.js` inside a stub module loader twice — once against the `0.1.1-rc.2` client surface and once against the `0.1.5-rc.2` one — asserts that the two keys are registered at a shadowing priority, and renders real rows (settled / running / errored, both block shapes) through React. Ten scenarios cover the two client surfaces, the highlighted diff, the plain `DiffBlock` fallback, the fail-soft skip when no diff renderer is exposed, the integrity of the injected stylesheet, the editor action and the payload it posts (clicked through recorded jsx props, since the harness has no DOM), the auto-open decision, the host half — route registration, PATH detection, path and hint validation, the fence, the body contract and a real HTTP round trip, all through injectable seams so no editor is installed and nothing is spawned — and the precedence between an invocation variable, a stored browser choice and a host default. When `@deepseek-ai/cordis` resolves (it does from inside a DSH profile tree), a final scenario drives the host row on a real cordis context and asserts the route arrives through scoped injection — including for a web server composed *after* the row; otherwise it prints a skip line. Pass a path to test another build (it must live in a package with `"type": "module"`, since the harness re-imports it per scenario):
 
 ```bash
 node test/run.mjs /path/to/other/client.js

@@ -31,14 +31,26 @@ const target = process.argv[2] === undefined ? resolve(here, "../lib/client.js")
 let importCounter = 0;
 /** Text of every stylesheet the bundle injected during the last import. */
 let injectedStyles = [];
+/** Backing store of the fake `window.localStorage`, reset per import. */
+let storage = new Map();
 
 /** Install the browser globals the bundle touches at import time. */
 function installBrowserGlobals() {
 	const registration = { value: null };
 	const styles = [];
 	injectedStyles = styles;
+	storage = new Map();
 	globalThis.window = {
 		setTimeout,
+		localStorage: {
+			getItem: (key) => (storage.has(key) ? storage.get(key) : null),
+			setItem: (key, value) => {
+				storage.set(key, String(value));
+			},
+			removeItem: (key) => {
+				storage.delete(key);
+			}
+		},
 		__ModuleLoader__: {
 			load(value) {
 				registration.value = value;
@@ -57,9 +69,15 @@ function installBrowserGlobals() {
 	return registration;
 }
 
-/** Import the bundle fresh (cache-busted) and return its factory. */
-async function loadFactory(file) {
+/**
+ * Import the bundle fresh (cache-busted) and return its factory.
+ * @param file - the bundle to import.
+ * @param seed - preferences to place in the fake `localStorage` *before* the
+ * import, since the bundle reads its stored choices at factory scope.
+ */
+async function loadFactory(file, seed) {
 	const registration = installBrowserGlobals();
+	if (seed !== undefined) for (const [key, value] of Object.entries(seed)) storage.set(key, value);
 	await import(`${pathToFileURL(file).href}?scenario=${importCounter++}`);
 	assert.ok(registration.value !== null, "the bundle never called window.__ModuleLoader__.load");
 	assert.equal(registration.value.id, "@jbdesarrollo/dsh-client-ui-mutdiff");
@@ -724,6 +742,51 @@ async function scenarioAutoOpen() {
 	assert.equal(firstChangedLine("a", ""), "", "empty new text yields no hint");
 	assert.equal(firstChangedLine("a", "x".repeat(400)).length, 240, "a very long line is capped before it crosses the wire");
 
+	// precedence, end to end through the store: an invocation variable outranks a
+	// preference stored in this browser, and the browser preference outranks the
+	// host's own default. Each case imports fresh, since the stored choices are
+	// read at factory scope.
+	const originalFetch = globalThis.fetch;
+	const stateFrom = (body) => () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
+	const ROSTER = [{ id: "code", label: "VS Code" }, { id: "windsurf", label: "Windsurf" }];
+	const loadWith = async (hostState, seed) => {
+		const factoryFresh = await loadFactory(target, seed);
+		const built = makePrimitives({ strictLabels: true });
+		const loaded = factoryFresh(makeRequire({ primitives: built.primitives, runtime: "missing", failures: [] }));
+		// the stub must be in place before mount, since activating the entry is
+		// what reads the roster
+		globalThis.fetch = stateFrom(hostState);
+		mount(loaded);
+		await settle();
+		return loaded.__testing.bridgeState();
+	};
+
+	try {
+		const plain = await loadWith({ ok: true, autoOpen: true, autoOpenPinnedBy: null, gotoLine: true, effective: "code", editors: ROSTER }, { "dsh-client-ui-mutdiff:auto-open": "0" });
+		assert.equal(plain.autoOpen, false, "a browser choice outranks the host default");
+		assert.equal(plain.autoOpenPinnedBy, null);
+
+		const pinned = await loadWith({ ok: true, autoOpen: true, autoOpenPinnedBy: "DSH_MUTDIFF_AUTO_OPEN", gotoLine: true, effective: "code", editors: ROSTER }, { "dsh-client-ui-mutdiff:auto-open": "0" });
+		assert.equal(pinned.autoOpen, true, "naming the variable on the invocation outranks a stored click");
+		assert.equal(pinned.autoOpenPinnedBy, "DSH_MUTDIFF_AUTO_OPEN", "the picker is told what pinned it");
+
+		const invokedOff = await loadWith({ ok: true, autoOpen: false, autoOpenPinnedBy: "DSH_MUTDIFF_AUTO_OPEN", gotoLine: true, effective: "code", editors: ROSTER }, { "dsh-client-ui-mutdiff:auto-open": "1" });
+		assert.equal(invokedOff.autoOpen, false, "and it can pin auto-open off just as well");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+
+	// the picker writes its choices, so a browser keeps them across reloads
+	const persistFactory = await loadFactory(target);
+	const persistExports = persistFactory(makeRequire({ primitives: makePrimitives({ strictLabels: true }).primitives, runtime: "missing", failures: [] }));
+	mount(persistExports);
+	await settle();
+	persistExports.__testing.setAutoOpen(true);
+	persistExports.__testing.chooseEditor("windsurf");
+	assert.equal(storage.get("dsh-client-ui-mutdiff:auto-open"), "1", "the switch persists");
+	assert.equal(storage.get("dsh-client-ui-mutdiff:editor"), "windsurf", "the editor choice persists");
+	assert.equal(persistExports.__testing.bridgeState().editor, "windsurf", "and takes effect immediately");
+
 	console.log("  ok  scenario G — auto-open fires once per settled success");
 }
 
@@ -811,13 +874,35 @@ async function scenarioHostRoute() {
 	assert.equal(typeof fake.registered[0].handler, "function");
 
 	// config is read defensively: nothing here may throw on a typo
-	const defaults = host.normalizeConfig(undefined);
-	assert.deepEqual(defaults, { editor: "auto", autoOpen: false, gotoLine: true, roots: [], openArgs: [] });
-	assert.equal(host.normalizeConfig({ editor: "   " }).editor, "auto", "a blank editor falls back to auto");
-	assert.equal(host.normalizeConfig({ autoOpen: "yes" }).autoOpen, false, "only a real boolean turns auto-open on");
-	assert.equal(host.normalizeConfig({ gotoLine: false }).gotoLine, false);
-	assert.deepEqual(host.normalizeConfig({ roots: ["/a", 7, ""] }).roots, ["/a"], "non-strings are dropped from roots");
-	assert.deepEqual(host.normalizeConfig("nonsense").openArgs, [], "a non-object config degrades to the defaults");
+	const none = {};
+	const defaults = host.normalizeConfig(undefined, none);
+	assert.deepEqual(defaults, {
+		editor: "auto",
+		autoOpen: false,
+		gotoLine: true,
+		roots: [],
+		openArgs: [],
+		sources: { editor: "default", autoOpen: "default", gotoLine: "default" }
+	});
+	assert.equal(host.normalizeConfig({ editor: "   " }, none).editor, "auto", "a blank editor falls back to auto");
+	assert.equal(host.normalizeConfig({ autoOpen: "yes" }, none).autoOpen, false, "only a real boolean turns auto-open on");
+	assert.equal(host.normalizeConfig({ gotoLine: false }, none).gotoLine, false);
+	assert.deepEqual(host.normalizeConfig({ roots: ["/a", 7, ""] }, none).roots, ["/a"], "non-strings are dropped from roots");
+	assert.deepEqual(host.normalizeConfig("nonsense", none).openArgs, [], "a non-object config degrades to the defaults");
+
+	// the invocation variables: no file, one run only
+	const invoked = host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: "1", DSH_MUTDIFF_EDITOR: "windsurf", DSH_MUTDIFF_GOTO_LINE: "0" });
+	assert.equal(invoked.autoOpen, true, "DSH_MUTDIFF_AUTO_OPEN=1 turns auto-open on for this run");
+	assert.equal(invoked.editor, "windsurf");
+	assert.equal(invoked.gotoLine, false, "DSH_MUTDIFF_GOTO_LINE=0 asks for no line jump");
+	assert.deepEqual(invoked.sources, { editor: "env", autoOpen: "env", gotoLine: "env" });
+	for (const falsey of ["0", "false", "no", "off", ""]) {
+		assert.equal(host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: falsey }).autoOpen, false, `"${falsey}" means off`);
+	}
+	assert.equal(host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: "true" }).autoOpen, true, "any other present value means on");
+	assert.equal(host.normalizeConfig({ editor: "zed" }, { DSH_MUTDIFF_EDITOR: "code" }).editor, "code", "the invocation outranks the row config");
+	assert.equal(host.normalizeConfig({ autoOpen: true }, { DSH_MUTDIFF_AUTO_OPEN: "0" }).autoOpen, false, "and it can turn a config default off");
+	assert.deepEqual(host.normalizeConfig({ autoOpen: true }, none).sources.autoOpen, "config", "a row default is reported as such");
 
 	// detection resolves a real executable off a PATH, without running anything
 	const binDir = mkdtempSync(join(tmpdir(), "mutdiff-bin-"));
@@ -847,6 +932,7 @@ async function scenarioHostRoute() {
 			assert.equal(state.ok, true);
 			assert.equal(state.effective, "code");
 			assert.equal(state.autoOpen, false, "auto-open is opt-in");
+			assert.equal(state.autoOpenPinnedBy, null, "nothing pinned it, so the picker owns the switch");
 			assert.deepEqual(state.editors, [{ id: "code", label: "VS Code" }]);
 
 			// a hint becomes the line it names, and the editor gets the reuse-window goto shape
@@ -872,6 +958,24 @@ async function scenarioHostRoute() {
 			assert.equal(bridge.open({ path: relative(process.cwd(), resolve(here, "../lib/index.js")) }).reason, "outside-workspace", "a relative path that does resolve is still held to the root list");
 			assert.equal(bridge.open({ path: `${file}\nrm -rf /` }).reason, "bad-request");
 			assert.equal(launched.length, 2, "a refused open must not reach the process boundary");
+
+			// a run pinned by an invocation variable, whose editor the picker may still override per click
+			const pinnedBridge = host.createBridge({
+				config: host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: "1", DSH_MUTDIFF_EDITOR: "windsurf" }),
+				detect: () => [
+					{ id: "windsurf", label: "Windsurf", command: codePath, family: "code", path: codePath },
+					{ id: "code", label: "VS Code", command: codePath, family: "code", path: codePath }
+				],
+				launch: (call) => {
+					launched.push(call);
+				},
+				roots: [root]
+			});
+			assert.equal(pinnedBridge.state().autoOpen, true);
+			assert.equal(pinnedBridge.state().autoOpenPinnedBy, "DSH_MUTDIFF_AUTO_OPEN", "an invocation-pinned run says so, so the picker can name it instead of offering a switch that loses");
+			assert.equal(pinnedBridge.state().effective, "windsurf", "the invoked editor leads the roster");
+			assert.deepEqual(pinnedBridge.open({ path: file, editor: "code" }).args.slice(0, 2), ["-r", "-g"], "a click may still choose another editor");
+			assert.equal(launched.at(-1).command, codePath);
 
 			// a launch failure is reported, not thrown
 			const failing = host.createBridge({

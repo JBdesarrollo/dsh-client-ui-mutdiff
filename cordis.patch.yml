@@ -5,10 +5,17 @@
 # lib/index.js in the host process, which registers the /mutdiff
 # open-in-editor route.
 #
-# The open-in-editor behaviour is configurable from your own patch layer
-# (~/.dsh/profiles/web/cordis.patch.yml), which overrides fields by entry id —
-# the closest thing to a `dsh web --code` flag, since the web app's own command
-# line is closed to plugins:
+# The open-in-editor behaviour is off by default and needs no configuration.
+# For one run, name an environment variable on the invocation — no file is
+# touched by anyone:
+#
+#   DSH_MUTDIFF_AUTO_OPEN=1 dsh web
+#   DSH_MUTDIFF_EDITOR=code DSH_MUTDIFF_AUTO_OPEN=1 dsh web
+#   DSH_MUTDIFF_GOTO_LINE=0 dsh web
+#
+# This patch layer is only for a durable default, and it is your file to edit
+# (the plugin reads config, it never writes it). Fields are overridden by entry
+# id, after every bundle layer:
 #
 #   - id: client-ui-mutdiff
 #     config:
@@ -17,6 +24,7 @@
 #       gotoLine: true     # jump to the first changed line
 #       roots: []          # extra directories an openable file may live under
 #       openArgs: []       # e.g. ['--line', '{line}', '{file}']
+#
 - insert:
   - id: client-ui-mutdiff
     name: '@jbdesarrollo/dsh-client-ui-mutdiff'
