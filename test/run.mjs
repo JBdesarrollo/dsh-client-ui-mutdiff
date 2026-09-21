@@ -766,11 +766,11 @@ async function scenarioAutoOpen() {
 		assert.equal(plain.autoOpen, false, "a browser choice outranks the host default");
 		assert.equal(plain.autoOpenPinnedBy, null);
 
-		const pinned = await loadWith({ ok: true, autoOpen: true, autoOpenPinnedBy: "DSH_MUTDIFF_AUTO_OPEN", gotoLine: true, effective: "code", editors: ROSTER }, { "dsh-client-ui-mutdiff:auto-open": "0" });
+		const pinned = await loadWith({ ok: true, autoOpen: true, autoOpenPinnedBy: "MUTDIFF_AUTO_OPEN", gotoLine: true, effective: "code", editors: ROSTER }, { "dsh-client-ui-mutdiff:auto-open": "0" });
 		assert.equal(pinned.autoOpen, true, "naming the variable on the invocation outranks a stored click");
-		assert.equal(pinned.autoOpenPinnedBy, "DSH_MUTDIFF_AUTO_OPEN", "the picker is told what pinned it");
+		assert.equal(pinned.autoOpenPinnedBy, "MUTDIFF_AUTO_OPEN", "the picker is told what pinned it");
 
-		const invokedOff = await loadWith({ ok: true, autoOpen: false, autoOpenPinnedBy: "DSH_MUTDIFF_AUTO_OPEN", gotoLine: true, effective: "code", editors: ROSTER }, { "dsh-client-ui-mutdiff:auto-open": "1" });
+		const invokedOff = await loadWith({ ok: true, autoOpen: false, autoOpenPinnedBy: "MUTDIFF_AUTO_OPEN", gotoLine: true, effective: "code", editors: ROSTER }, { "dsh-client-ui-mutdiff:auto-open": "1" });
 		assert.equal(invokedOff.autoOpen, false, "and it can pin auto-open off just as well");
 	} finally {
 		globalThis.fetch = originalFetch;
@@ -891,18 +891,22 @@ async function scenarioHostRoute() {
 	assert.deepEqual(host.normalizeConfig("nonsense", none).openArgs, [], "a non-object config degrades to the defaults");
 
 	// the invocation variables: no file, one run only
-	const invoked = host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: "1", DSH_MUTDIFF_EDITOR: "windsurf", DSH_MUTDIFF_GOTO_LINE: "0" });
-	assert.equal(invoked.autoOpen, true, "DSH_MUTDIFF_AUTO_OPEN=1 turns auto-open on for this run");
+	const invoked = host.normalizeConfig(undefined, { MUTDIFF_AUTO_OPEN: "1", MUTDIFF_EDITOR: "windsurf", MUTDIFF_GOTO_LINE: "0" });
+	assert.equal(invoked.autoOpen, true, "MUTDIFF_AUTO_OPEN=1 turns auto-open on for this run");
 	assert.equal(invoked.editor, "windsurf");
-	assert.equal(invoked.gotoLine, false, "DSH_MUTDIFF_GOTO_LINE=0 asks for no line jump");
+	assert.equal(invoked.gotoLine, false, "MUTDIFF_GOTO_LINE=0 asks for no line jump");
 	assert.deepEqual(invoked.sources, { editor: "env", autoOpen: "env", gotoLine: "env" });
 	for (const falsey of ["0", "false", "no", "off", ""]) {
-		assert.equal(host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: falsey }).autoOpen, false, `"${falsey}" means off`);
+		assert.equal(host.normalizeConfig(undefined, { MUTDIFF_AUTO_OPEN: falsey }).autoOpen, false, `"${falsey}" means off`);
 	}
-	assert.equal(host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: "true" }).autoOpen, true, "any other present value means on");
-	assert.equal(host.normalizeConfig({ editor: "zed" }, { DSH_MUTDIFF_EDITOR: "code" }).editor, "code", "the invocation outranks the row config");
-	assert.equal(host.normalizeConfig({ autoOpen: true }, { DSH_MUTDIFF_AUTO_OPEN: "0" }).autoOpen, false, "and it can turn a config default off");
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_AUTO_OPEN: "true" }).autoOpen, true, "any other present value means on");
+	assert.equal(host.normalizeConfig({ editor: "zed" }, { MUTDIFF_EDITOR: "code" }).editor, "code", "the invocation outranks the row config");
+	assert.equal(host.normalizeConfig({ autoOpen: true }, { MUTDIFF_AUTO_OPEN: "0" }).autoOpen, false, "and it can turn a config default off");
 	assert.deepEqual(host.normalizeConfig({ autoOpen: true }, none).sources.autoOpen, "config", "a row default is reported as such");
+	// the harness reserves DSH_* for the launching environment (a .env that sets one
+	// is a boot failure), so the plugin must not read from that namespace at all
+	assert.equal(host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: "1" }).autoOpen, false, "a DSH_-prefixed name is the harness's namespace, not this plugin's");
+	assert.deepEqual(host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: "1" }).sources.autoOpen, "default");
 
 	// detection resolves a real executable off a PATH, without running anything
 	const binDir = mkdtempSync(join(tmpdir(), "mutdiff-bin-"));
@@ -961,7 +965,7 @@ async function scenarioHostRoute() {
 
 			// a run pinned by an invocation variable, whose editor the picker may still override per click
 			const pinnedBridge = host.createBridge({
-				config: host.normalizeConfig(undefined, { DSH_MUTDIFF_AUTO_OPEN: "1", DSH_MUTDIFF_EDITOR: "windsurf" }),
+				config: host.normalizeConfig(undefined, { MUTDIFF_AUTO_OPEN: "1", MUTDIFF_EDITOR: "windsurf" }),
 				detect: () => [
 					{ id: "windsurf", label: "Windsurf", command: codePath, family: "code", path: codePath },
 					{ id: "code", label: "VS Code", command: codePath, family: "code", path: codePath }
@@ -972,7 +976,7 @@ async function scenarioHostRoute() {
 				roots: [root]
 			});
 			assert.equal(pinnedBridge.state().autoOpen, true);
-			assert.equal(pinnedBridge.state().autoOpenPinnedBy, "DSH_MUTDIFF_AUTO_OPEN", "an invocation-pinned run says so, so the picker can name it instead of offering a switch that loses");
+			assert.equal(pinnedBridge.state().autoOpenPinnedBy, "MUTDIFF_AUTO_OPEN", "an invocation-pinned run says so, so the picker can name it instead of offering a switch that loses");
 			assert.equal(pinnedBridge.state().effective, "windsurf", "the invoked editor leads the roster");
 			assert.deepEqual(pinnedBridge.open({ path: file, editor: "code" }).args.slice(0, 2), ["-r", "-g"], "a click may still choose another editor");
 			assert.equal(launched.at(-1).command, codePath);

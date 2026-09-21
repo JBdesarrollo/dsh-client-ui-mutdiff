@@ -9,9 +9,9 @@
 # For one run, name an environment variable on the invocation — no file is
 # touched by anyone:
 #
-#   DSH_MUTDIFF_AUTO_OPEN=1 dsh web
-#   DSH_MUTDIFF_EDITOR=code DSH_MUTDIFF_AUTO_OPEN=1 dsh web
-#   DSH_MUTDIFF_GOTO_LINE=0 dsh web
+#   MUTDIFF_AUTO_OPEN=1 dsh web
+#   MUTDIFF_EDITOR=code MUTDIFF_AUTO_OPEN=1 dsh web
+#   MUTDIFF_GOTO_LINE=0 dsh web
 #
 # This patch layer is only for a durable default, and it is your file to edit
 # (the plugin reads config, it never writes it). Fields are overridden by entry

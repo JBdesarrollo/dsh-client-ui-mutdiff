@@ -46,25 +46,27 @@ Detection is a PATH scan over this table, in order; the configured editor is off
 Naming an environment variable on the invocation **is** the opt-in. It touches no file, applies to that process only, and the next plain `dsh web` is back to the manual button:
 
 ```bash
-DSH_MUTDIFF_AUTO_OPEN=1 dsh web                          # open every successful edit/write
-DSH_MUTDIFF_EDITOR=windsurf dsh web                      # pick the editor for this run
-DSH_MUTDIFF_AUTO_OPEN=1 DSH_MUTDIFF_EDITOR=code dsh web  # both
-DSH_MUTDIFF_GOTO_LINE=0 dsh web                          # open the file, don't jump to the change
+MUTDIFF_AUTO_OPEN=1 dsh web                          # open every successful edit/write
+MUTDIFF_EDITOR=windsurf dsh web                      # pick the editor for this run
+MUTDIFF_AUTO_OPEN=1 MUTDIFF_EDITOR=code dsh web  # both
+MUTDIFF_GOTO_LINE=0 dsh web                          # open the file, don't jump to the change
 ```
 
 An alias gives you a flag of your own:
 
 ```bash
-alias dsh-code='DSH_MUTDIFF_AUTO_OPEN=1 DSH_MUTDIFF_EDITOR=code dsh web'
+alias dsh-code='MUTDIFF_AUTO_OPEN=1 MUTDIFF_EDITOR=code dsh web'
 ```
 
 | variable | values | effect |
 | --- | --- | --- |
-| `DSH_MUTDIFF_AUTO_OPEN` | `1`/`true`/anything present → on; `0`, `false`, `no`, `off`, empty → off | open every settled, successful mutation without a click |
-| `DSH_MUTDIFF_EDITOR` | an id from the table above, or a command on the PATH | the editor this run prefers |
-| `DSH_MUTDIFF_GOTO_LINE` | as above | whether to jump to the first changed line |
+| `MUTDIFF_AUTO_OPEN` | `1`/`true`/anything present → on; `0`, `false`, `no`, `off`, empty → off | open every settled, successful mutation without a click |
+| `MUTDIFF_EDITOR` | an id from the table above, or a command on the PATH | the editor this run prefers |
+| `MUTDIFF_GOTO_LINE` | as above | whether to jump to the first changed line |
 
-The naming follows the harness's own invocation-time capability variables (`$DSH_WEB_SEARCH_PROVIDER`, `$BROWSER`). Naming one is the deliberate act for that process, so it **outranks a preference stored in the browser**: while a variable pins auto-open, the picker shows the pinned value, says which variable did it, and refuses to toggle — rather than offering a switch that silently loses. The editor picker keeps working regardless, because a chosen editor rides each open request.
+The names carry the plugin's own prefix because the harness reserves `DSH_`: a `.env` that declares a `DSH_` name makes the launcher refuse to start ("only the launching environment may set it"), so a plugin squatting that prefix would turn a reader's per-project `.env` into a boot failure. `MUTDIFF_*` therefore works from the launching environment, from a `.env`, or from an alias — and the plugin reads nothing from the `DSH_` namespace.
+
+Naming a variable is the deliberate act for that process, so it **outranks a preference stored in the browser**: while a variable pins auto-open, the picker shows the pinned value, says which variable did it, and refuses to toggle — rather than offering a switch that silently loses. The editor picker keeps working regardless, because a chosen editor rides each open request.
 
 ### A durable default (optional, and yours to write)
 
@@ -186,7 +188,7 @@ dsh plugin --profile web add github:JBdesarrollo/dsh-client-ui-mutdiff
 If you shared it as a tarball or a local folder, use the path instead:
 
 ```bash
-dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.3.1.tgz
+dsh plugin --profile web add ./dsh-client-ui-mutdiff-0.3.2.tgz
 # or
 dsh plugin --profile web add ../your-copy-of/dsh-client-ui-mutdiff
 ```
