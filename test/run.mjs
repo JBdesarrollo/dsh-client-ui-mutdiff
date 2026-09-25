@@ -936,10 +936,11 @@ async function scenarioHostRoute() {
 		editor: "auto",
 		autoOpen: false,
 		follow: false,
+		followCli: false,
 		gotoLine: true,
 		roots: [],
 		openArgs: [],
-		sources: { editor: "default", autoOpen: "default", follow: "default", gotoLine: "default" },
+		sources: { editor: "default", autoOpen: "default", follow: "default", followCli: "default", gotoLine: "default" },
 		autoOpenVariable: null
 	});
 	assert.equal(host.normalizeConfig({ editor: "   " }, none).editor, "auto", "a blank editor falls back to auto");
@@ -953,7 +954,7 @@ async function scenarioHostRoute() {
 	assert.equal(invoked.autoOpen, true, "MUTDIFF_AUTO_OPEN=1 turns auto-open on for this run");
 	assert.equal(invoked.editor, "windsurf");
 	assert.equal(invoked.gotoLine, false, "MUTDIFF_GOTO_LINE=0 asks for no line jump");
-	assert.deepEqual(invoked.sources, { editor: "env", autoOpen: "env", follow: "default", gotoLine: "env" });
+	assert.deepEqual(invoked.sources, { editor: "env", autoOpen: "env", follow: "default", followCli: "default", gotoLine: "env" });
 	// the one-word form: naming MUTDIFF at all is the request
 	const word = (value) => host.normalizeConfig(undefined, { MUTDIFF: value });
 	assert.equal(word("code").editor, "code", "MUTDIFF=code names the editor");
@@ -969,13 +970,21 @@ async function scenarioHostRoute() {
 	assert.equal(host.normalizeConfig(undefined, { MUTDIFF: "code", MUTDIFF_EDITOR: "zed" }).editor, "zed", "the spelled-out variable wins over the word");
 	assert.equal(host.normalizeConfig({ autoOpen: true }, { MUTDIFF: "0" }).autoOpen, false, "and the word wins over a row default");
 
-	// live follow: its own variable, its own source, and off unless it is asked for
+	// live follow: its own variable, its own source, and off unless it is asked for.
+	// `1` publishes and raises nothing; the CLI is a word the reader has to type.
 	assert.equal(host.normalizeConfig(undefined, {}).follow, false, "follow is opt-in like everything else");
 	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1" }).follow, true);
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1" }).followCli, false, "asking to follow is not asking to be interrupted: the CLI stays out of it");
 	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1" }).sources.follow, "env");
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "cli" }).followCli, true, "the window-raising fallback is its own word");
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "raise" }).followCli, true, "spelled the other way as well");
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "cli" }).follow, true, "and it implies following at all");
 	assert.equal(host.normalizeConfig({ follow: true }, {}).follow, true, "a row default may turn it on");
 	assert.equal(host.normalizeConfig({ follow: true }, {}).sources.follow, "config");
+	assert.equal(host.normalizeConfig({ followCli: true }, {}).follow, true, "asking for the CLI fallback implies following");
+	assert.equal(host.normalizeConfig({ followCli: true }, {}).followCli, true);
 	assert.equal(host.normalizeConfig({ follow: true }, { MUTDIFF_FOLLOW: "0" }).follow, false, "and the invocation can turn it back off");
+	assert.equal(host.normalizeConfig({ follow: true }, { MUTDIFF_FOLLOW: "0" }).followCli, false);
 	assert.equal(host.normalizeConfig({ follow: "yes" }, {}).follow, false, "only a real boolean or a variable turns it on");
 	assert.equal(host.normalizeConfig(undefined, { MUTDIFF: "code" }).follow, false, "the one-word form stays about auto-open");
 
@@ -1082,6 +1091,9 @@ async function scenarioHostRoute() {
 				roots: [root]
 			});
 			assert.equal(following.state().follow, true);
+			assert.equal(following.state().followCli, false, "the automatic mode stands down, and the CLI fallback is not what replaced it");
+			assert.equal(following.state().subscribers, 0, "nobody is listening to the feed yet");
+			assert.equal(following.state().editorSubscribers, 0);
 			assert.equal(following.state().autoOpen, false, "the host is opening every edit itself, so the page must not");
 			assert.equal(following.state().autoOpenPinnedBy, "MUTDIFF_AUTO_OPEN", "the variable that pinned auto-open is still named");
 			const idle = host.createBridge({
@@ -1091,6 +1103,7 @@ async function scenarioHostRoute() {
 				roots: [root]
 			});
 			assert.equal(idle.state().follow, true, "a row default turns follow on without an invocation variable");
+			assert.equal(idle.state().followCli, false, "and still does not raise anyone's window");
 			assert.equal(idle.state().autoOpen, false);
 
 			// a launch failure is reported, not thrown
@@ -1243,7 +1256,8 @@ async function scenarioHostFence() {
  */
 async function scenarioFollow() {
 	const host = await import(`${pathToFileURL(resolve(here, "../lib/index.js")).href}?scenario=${importCounter++}`);
-	const config = host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1", MUTDIFF_EDITOR: "code" });
+	const cliConfig = host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "cli", MUTDIFF_EDITOR: "code" });
+	const publishConfig = host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1", MUTDIFF_EDITOR: "code" });
 
 	// The pure line arithmetic first, since everything below rides on it.
 	assert.equal(host.lineForProbe("one\ntwo\nthree\n", "three"), 3, "a probe resolves to the line it sits on");
@@ -1316,18 +1330,29 @@ async function scenarioFollow() {
 		return { path, oldText, newText };
 	};
 	const revealed = [];
-	const follower = host.createFollower({
+	const published = [];
+	/**
+	 * A follower over the same seams. `open` is the CLI — the thing that raises a
+	 * window — and `publish` is the activity feed, so every assertion below can
+	 * say which of the two a given configuration reached.
+	 */
+	const makeFollower = (config, extra = {}) => host.createFollower({
 		config,
 		open: (payload) => {
 			revealed.push(payload);
 			return { ok: true, line: payload.line };
 		},
+		publish: (activity) => {
+			published.push(activity);
+		},
 		read: (file) => store.get(file),
 		timer,
 		now: () => clock,
 		coalesceMs: 150,
-		stickyMs: 1500
+		stickyMs: 1500,
+		...extra
 	});
+	const follower = makeFollower(cliConfig);
 	const result = (meta) => ({ type: "tool/result", seq: 1, time: clock, data: { turn: 1, step: 1, message: {}, meta } });
 	const call = (name, args) => ({ type: "tool/call", seq: 2, time: clock, data: { turn: 1, step: 1, callId: "c1", name, arguments: JSON.stringify(args) } });
 
@@ -1336,6 +1361,7 @@ async function scenarioFollow() {
 	assert.deepEqual(revealed, [], "a reveal waits out the coalescing window");
 	assert.equal(fire(), 1, "exactly one burst was scheduled");
 	assert.deepEqual(revealed, [{ path: "/w/main.ts", line: 3 }], "the caret lands on the line the hunk added, not the hunk's first context line");
+	assert.deepEqual(published, [{ path: "/w/main.ts", line: 3, time: clock }], "and the same location goes to the activity feed, which is what a connected editor reads");
 
 	// The same line again is not worth raising the window for…
 	follower.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: "two\nthree", newText: "two\nTWO\nthree" }] }));
@@ -1395,7 +1421,7 @@ async function scenarioFollow() {
 	// A reveal the bridge refused (outside the workspace, no editor) does not
 	// become the sticky line, so the next event still tries.
 	const refusing = host.createFollower({
-		config,
+		config: cliConfig,
 		open: () => ({ ok: false, reason: "outside-workspace" }),
 		read: (file) => store.get(file),
 		timer,
@@ -1412,6 +1438,42 @@ async function scenarioFollow() {
 	const off = host.createFollower({ config: host.normalizeConfig(undefined, {}), open: () => ({ ok: true }), read: () => "x", timer, now: () => clock });
 	off.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: null, newText: "x" }] }));
 	assert.equal(fire(), 0, "follow does nothing unless it was asked for");
+
+	// ── the window-raising decision ──────────────────────────────────────────
+	// Asking to follow is not asking to be interrupted. `MUTDIFF_FOLLOW=1`
+	// publishes the location and reaches no CLI at all: the editor that is
+	// connected reveals it without raising its window, and `code -r -g` cannot.
+	clock += 10_000;
+	const publishedOnly = makeFollower(publishConfig);
+	const beforePublished = published.length;
+	const beforeRevealed = revealed.length;
+	publishedOnly.handle({}, result({ diffs: [applied("/w/main.ts", "three", "THREE")] }));
+	assert.equal(fire(), 1, "the location is still resolved and published");
+	assert.equal(published.length, beforePublished + 1, "a publish-only run publishes");
+	assert.equal(revealed.length, beforeRevealed, "and spawns nothing — no window is raised for a reader who never asked for one");
+	publishedOnly.handle({}, result({ diffs: [applied("/w/main.ts", "three", "THREE")] }));
+	fire();
+	assert.equal(published.length, beforePublished + 1, "the sticky window applies to publishing too, so one line is one message");
+	publishedOnly.dispose();
+
+	// In `cli` mode the fallback is reached only while no editor is connected.
+	// Once one is, it is doing the revealing properly and the CLI would fight it.
+	const withEditor = makeFollower(cliConfig, { hasEditor: () => true });
+	const beforeAttached = revealed.length;
+	withEditor.handle({}, result({ diffs: [applied("/w/burst.ts", "alpha", "alpha\nA2")] }));
+	fire();
+	assert.equal(revealed.length, beforeAttached, "a connected editor takes the reveal off the CLI");
+	assert.equal(published.at(-1).path, "/w/burst.ts", "and the location is published to it instead");
+	withEditor.dispose();
+
+	// Once the editor disconnects, the fallback is back: the same configuration,
+	// the same event, now reaching the process boundary.
+	const withoutEditor = makeFollower(cliConfig, { hasEditor: () => false });
+	clock += 10_000;
+	withoutEditor.handle({}, result({ diffs: [applied("/w/burst.ts", "alpha", "alpha\nA3")] }));
+	fire();
+	assert.equal(revealed.at(-1).path, "/w/burst.ts", "with nobody connected, `cli` mode reveals through the editor's own CLI, which raises its window by design");
+	withoutEditor.dispose();
 
 	// A waiting burst is dropped when the row unloads.
 	follower.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: "four", newText: "FOUR" }] }));
@@ -1457,11 +1519,29 @@ async function scenarioFollowWiring() {
 	chmodSync(join(bin, "code"), 0o755);
 	const previousPath = process.env.PATH;
 	process.env.PATH = bin;
+	let server;
+	let abort;
 	try {
+		// The row's route, served for real so a real subscriber can attach to it.
+		const routes = [];
 		const context = new cordis.Context();
-		context.provide("webServer", { register: () => () => {} });
+		context.provide("webServer", { register: (route) => { routes.push(route); return () => {}; } });
 		context.plugin(host, { follow: true, editor: "code" });
 		await settle();
+		assert.equal(routes.length, 1, "the row claims its route");
+		server = createServer(routes[0].handler);
+		await new Promise((done) => { server.listen(0, "127.0.0.1", done); });
+		const base = `http://127.0.0.1:${String(server.address().port)}`;
+
+		// An editor connects to the activity feed and says who it is.
+		abort = new AbortController();
+		const stream = await fetch(`${base}/mutdiff/activity?role=editor`, { signal: abort.signal });
+		assert.equal(stream.status, 200);
+		assert.match(stream.headers.get("content-type"), /text\/event-stream/, "the feed is an event stream, not a poll");
+		const frames = await openStream(stream);
+		const hello = await frames.waitFor("hello", 2_000);
+		assert.equal(hello.ok, true, "a subscriber is greeted before anything happens");
+		assert.equal(hello.last, null, "and told there is nothing yet");
 
 		// The event a `write`/`edit` tool result carries: path plus applied hunk.
 		// The tool writes the file first and the event lands after, so the file on
@@ -1479,8 +1559,42 @@ async function scenarioFollowWiring() {
 			}
 		});
 
+		const activity = await frames.waitFor("activity", 4_000);
+		assert.equal(activity.path, file, "the connected editor is told which file");
+		assert.equal(activity.line, 2, "and the exact line the hunk added");
+		// The whole point of the feed: a connected editor reveals this itself,
+		// with preserveFocus, so nothing has to be raised — and nothing is.
+		await new Promise((done) => { setTimeout(done, 400); });
+		assert.equal(existsSync(record), false, "a connected editor means no CLI is spawned and no window is raised");
+
+		// Who is listening is reported, because it decides whether the fallback
+		// applies at all — and because a reader deserves to see it.
+		const state = await (await fetch(`${base}/mutdiff/state`)).json();
+		assert.equal(state.follow, true);
+		assert.equal(state.followCli, false, "this row was not asked for the CLI fallback");
+		assert.equal(state.subscribers, 1);
+		assert.equal(state.editorSubscribers, 1);
+		abort.abort();
+		await new Promise((done) => { setTimeout(done, 200); });
+		const afterLeave = await (await fetch(`${base}/mutdiff/state`)).json();
+		assert.equal(afterLeave.subscribers, 0, "a dropped connection stops counting");
+
+		// `cli` mode is the fallback a reader asks for by name: with nobody
+		// connected it reaches the editor's own CLI, which raises its window.
+		const cliFile = join(root, "cli-app.ts");
+		writeFileSync(cliFile, "one\nTWO\ntwo\n");
+		const fallback = new cordis.Context();
+		fallback.provide("webServer", { register: () => () => {} });
+		fallback.plugin(host, { followCli: true, editor: "code" });
+		await settle();
+		fallback.emit("session/event", {}, {
+			type: "tool/result",
+			seq: 1,
+			time: Date.now(),
+			data: { turn: 1, step: 1, message: {}, meta: { diffs: [{ path: cliFile, oldText: "one\ntwo", newText: "one\nTWO\ntwo" }] } }
+		});
 		const argv = await waitForLines(record, 4_000);
-		assert.deepEqual(argv, ["-r", "-g", `${file}:2`], "the row follows a real event to a real editor launch, on the line the hunk added");
+		assert.deepEqual(argv, ["-r", "-g", `${cliFile}:2`], "the named fallback follows a real event to a real editor launch, on the line the hunk added");
 
 		// Follow is off unless the row is configured for it: the same event then
 		// reaches a listener that does nothing, and no process is spawned.
@@ -1502,11 +1616,54 @@ async function scenarioFollowWiring() {
 		await new Promise((done) => { setTimeout(done, 400); });
 		assert.equal(existsSync(quietRecord), false, "an unconfigured row follows nothing");
 
-		console.log("  ok  scenario L — live follow end to end: the row, a real event, and a real spawn");
+		console.log("  ok  scenario L — live follow end to end: the feed, the fallback, and the row");
 	} finally {
+		abort?.abort();
+		if (server !== undefined) await new Promise((done) => { server.close(done); });
 		process.env.PATH = previousPath;
 		rmSync(root, { recursive: true, force: true });
 	}
+}
+
+/**
+ * Read a `text/event-stream` response as frames, in the background, so a test can
+ * await one by name without racing the socket.
+ *
+ * @param response - the fetched stream response.
+ * @returns `{waitFor}` over the accumulated frames.
+ */
+async function openStream(response) {
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	let closed = false;
+	void (async () => {
+		try {
+			for (;;) {
+				const { value, done } = await reader.read();
+				if (done === true) break;
+				buffer += decoder.decode(value, { stream: true });
+			}
+		} catch {
+			// The subscriber aborted; that is a case under test, not a failure.
+		} finally {
+			closed = true;
+		}
+	})();
+	return {
+		async waitFor(name, timeoutMs) {
+			const deadline = Date.now() + timeoutMs;
+			for (;;) {
+				const match = new RegExp(`event: ${name}\\ndata: (.*)\\n\\n`).exec(buffer);
+				if (match !== null) {
+					buffer = buffer.slice(match.index + match[0].length);
+					return JSON.parse(match[1]);
+				}
+				if (Date.now() > deadline) assert.fail(`no "${name}" frame arrived${closed ? " (the stream closed first)" : ""}`);
+				await new Promise((done) => { setTimeout(done, 25); });
+			}
+		}
+	};
 }
 
 /** Poll for a file of recorded lines, and return them; fails loudly on timeout. */

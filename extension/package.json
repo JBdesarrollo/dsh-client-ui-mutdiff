@@ -1,0 +1,73 @@
+{
+  "name": "dsh-mutdiff-follow",
+  "displayName": "DeepSeek Harness — follow the edited line",
+  "description": "Follows the file and line DeepSeek Harness is editing, live, without stealing focus: the changed line is revealed and highlighted in place.",
+  "version": "0.1.0",
+  "publisher": "jbdesarrollo",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "DSH follow",
+      "properties": {
+        "dshMutdiff.endpoint": {
+          "type": "string",
+          "default": "http://127.0.0.1:3080/mutdiff/activity",
+          "description": "The harness activity feed to follow. The plugin's route on the composed harness web server; the port must be the one `dsh web` listens on."
+        },
+        "dshMutdiff.reveal": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reveal the edited line in place. The editor is opened without focus (`preserveFocus`), so this never brings the window to the front. Turn it off to keep only the status bar item."
+        },
+        "dshMutdiff.highlightMs": {
+          "type": "number",
+          "default": 2500,
+          "description": "How long the changed line stays highlighted, in milliseconds. `0` keeps the highlight until the next edit."
+        },
+        "dshMutdiff.column": {
+          "type": "string",
+          "enum": [
+            "active",
+            "beside",
+            "one",
+            "two",
+            "three"
+          ],
+          "default": "active",
+          "description": "Which editor group the file is shown in. `active` keeps the layout untouched; `beside` splits off a follow column, which is often the calmest choice while working in another file."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "dshMutdiff.toggle",
+        "title": "DSH follow: pause or resume following"
+      },
+      {
+        "command": "dshMutdiff.openLast",
+        "title": "DSH follow: open the last edited line (with focus)"
+      },
+      {
+        "command": "dshMutdiff.reconnect",
+        "title": "DSH follow: reconnect to the harness"
+      }
+    ]
+  },
+  "scripts": {
+    "test": "node test.mjs"
+  }
+}

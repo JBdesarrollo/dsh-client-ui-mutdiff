@@ -1,7 +1,7 @@
 {
   "name": "@jbdesarrollo/dsh-client-ui-mutdiff",
-  "description": "DeepSeek Harness client plugin: write/edit diffs expanded by default and untruncated in the agent chat, with live follow-in-editor (real-time, line-accurate) and a one-click open-in-editor bridge.",
-  "version": "0.4.0",
+  "description": "DeepSeek Harness client plugin: write/edit diffs expanded by default and untruncated in the agent chat, with a live follow activity feed (published, never window-raising) and a one-click open-in-editor bridge.",
+  "version": "0.5.0",
   "publishConfig": {
     "access": "public"
   },
@@ -32,10 +32,13 @@
   "files": [
     "lib/index.js",
     "lib/client.js",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "extension/package.json",
+    "extension/extension.js",
+    "extension/README.md"
   ],
   "scripts": {
-    "test": "node test/run.mjs"
+    "test": "node test/run.mjs && node extension/test.mjs"
   },
   "devDependencies": {
     "react": "^18.3.1",

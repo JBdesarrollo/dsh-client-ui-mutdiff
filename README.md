@@ -24,7 +24,7 @@ Every `edit` / `write` row now carries an action beside **Inspect**:
 
 - **Open in editor** — launches your editor's CLI on that file, caret on the first added line.
 - **▾** — a picker with the editors this host can actually launch, and an **Open every edited file automatically** switch.
-- **Live follow** — one variable makes the *host* follow edits in real time, with a real line number instead of a hint, whether or not the page is showing the row. See [Live follow](#live-follow).
+- **Live follow** — the host resolves the exact line each edit lands on and publishes it on an activity feed; a connected editor reveals it **without raising its window**. See [Live follow](#live-follow).
 
 Nothing is on by default and nothing is configured in a file: the button is there, auto-open is off, and one environment variable on the invocation turns the automatic mode on — see [Turning it on for one run](#turning-it-on-for-one-run).
 
@@ -59,20 +59,23 @@ The spelled-out form is there when a field needs to be precise, and any of it ov
 MUTDIFF_EDITOR=zed dsh web          # the editor for this run
 MUTDIFF_AUTO_OPEN=1 dsh web         # the automatic mode on its own
 MUTDIFF_GOTO_LINE=0 dsh web         # open the file without jumping to the change
+MUTDIFF_FOLLOW=1 dsh web            # publish every edit for a connected editor (raises nothing)
+MUTDIFF_FOLLOW=cli dsh web          # …and allow the CLI reveal, which does raise the window
 ```
 
 An alias gives you a flag of your own:
 
 ```bash
 alias dsh-code='MUTDIFF_AUTO_OPEN=1 MUTDIFF_EDITOR=code dsh web'
-alias dsh-live='MUTDIFF_FOLLOW=1 MUTDIFF_EDITOR=code dsh web'   # the host follows, in real time
+alias dsh-live='MUTDIFF_FOLLOW=1 MUTDIFF_EDITOR=code dsh web'      # publish for the extension, quietly
+alias dsh-loud='MUTDIFF_FOLLOW=cli MUTDIFF_EDITOR=code dsh web'    # let the CLI move the caret, window and all
 ```
 
 | variable | values | effect |
 | --- | --- | --- |
 | `MUTDIFF` | an editor id or command → that editor, automatic mode on; `1`/`true`/`on`/`auto` → detected editor, automatic mode on; `0`/`false`/`no`/`off` → off | the one-word form |
 | `MUTDIFF_AUTO_OPEN` | `1`/`true`/anything present → on; `0`, `false`, `no`, `off`, empty → off | open every settled, successful mutation without a click |
-| `MUTDIFF_FOLLOW` | as above | the **host** follows every applied edit in real time, from the session's own event feed, with the exact line — see [Live follow](#live-follow). It owns the automatic mode while it is on |
+| `MUTDIFF_FOLLOW` | `1`/`true`/`on`/`auto` → publish every applied edit on the activity feed; `cli`/`raise`/`window` → same, **plus** the editor's CLI fallback while no editor is connected; `0`, `false`, `no`, `off`, empty → off | live follow — see [Live follow](#live-follow). It publishes; it raises no window unless the word says so |
 | `MUTDIFF_EDITOR` | an id from the table above, or a command on the PATH | the editor this run prefers |
 | `MUTDIFF_GOTO_LINE` | as above | whether to jump to the first changed line |
 
@@ -88,7 +91,8 @@ If you would rather not type the variable every time, put it in **your** patch l
 - id: client-ui-mutdiff
   name: '@jbdesarrollo/dsh-client-ui-mutdiff'   # optional assertion: a mismatched id is skipped, not misconfigured
   config:
-    follow: false        # default: false — the host follows every applied edit in real time
+    follow: false        # default: false — publish every applied edit on the activity feed
+    followCli: false     # default: false — also let the editor's CLI reveal it (raises its window)
     autoOpen: true       # default: false
     editor: code         # auto | an id above | a command resolved on the PATH
     gotoLine: true       # default: true
@@ -112,13 +116,15 @@ The action above is a click, and the automatic mode is driven by the page: it fi
 - The hint can land on an earlier copy of the same line, and any mismatch degrades to the top of the file.
 - The reveal waits for the whole call to settle, so a long `edit` moves the caret only once it is over.
 
-Live follow moves the decision to the host, where it belongs, and hands the editor a **real line number** instead of a hint. One variable turns it on for one run:
+Live follow moves the decision to the host, where it belongs, and hands the editor a **real line number** instead of a hint:
 
 ```bash
-MUTDIFF_FOLLOW=1 dsh web                 # follow every edit, with the detected editor
-MUTDIFF=code MUTDIFF_FOLLOW=1 dsh web    # and name the editor at the same time
+MUTDIFF_FOLLOW=1 dsh web                 # publish every edit as it lands
+MUTDIFF_FOLLOW=cli dsh web               # and let the editor's CLI reveal it (raises the window)
 MUTDIFF_FOLLOW=0 dsh web                 # explicitly off, whatever else is configured
 ```
+
+**It publishes; it does not intrude.** `MUTDIFF_FOLLOW=1` resolves where the agent is working and hands it to whoever is connected to the activity feed — no editor is launched, and **no window is raised, ever**. A connected editor (the [VS Code extension](#the-vs-code-extension), or anything on loopback that speaks Server-Sent Events) reveals the line itself, which is the only way to move a caret *without* bringing the window to the front. The editor's CLI is reached only under the explicit `cli` word, and only while nothing is connected, because `code -r -g` raises its window by design and there is no flag to stop it: that is an intrusion a reader has to choose, not a default this plugin gets to pick.
 
 The host subscribes to the session's own event feed (`session/event`), so it sees what the agent is doing with no browser, no click, and no need for the conversation to be on screen at all. Two of those events describe a file change outright:
 
@@ -133,14 +139,28 @@ The host subscribes to the session's own event feed (`session/event`), so it see
 
 `write` has no probe on disk before it runs, so it is left to the applied diff, where its block *is* the file content and its first line with content is the line a reader wants.
 
-**Bursts and repeats are absorbed.** Mutations in flight for one file coalesce into a single editor call carrying the last line the burst reached, and a file already sitting on that line is not re-opened for a while afterwards — so a long edit loop is followed rather than turned into a window-raising storm.
+**Bursts and repeats are absorbed.** Mutations in flight for one file coalesce into a single published location carrying the last line the burst reached, and a file already sitting on that line is not re-published for a while afterwards — so a long edit loop is followed rather than turned into a storm of one kind or the other.
 
 With follow on, the browser half **stands its own automatic mode down** (the `/mutdiff/state` answer reports `follow: true` and `autoOpen: false`), so one change can never open two windows; the picker shows the switch disabled with a note saying why. Everything else — the click, the picker, the diff row — behaves exactly as before.
 
+### The VS Code extension
+
+The other half of follow is a twenty-line-at-heart extension in this repository, [`extension/`](extension/README.md). It subscribes to the feed and reveals the line with `showTextDocument(…, { preserveFocus: true })` — the one API that moves the caret without raising the window — plus a highlight on the changed line, a status bar item that names `file:line`, and commands to pause, reconnect, and deliberately open the last location *with* focus.
+
+```bash
+mkdir -p ~/.vscode-server/extensions/jbdesarrollo.dsh-mutdiff-follow-0.1.0
+cp -r /path/to/dsh-client-ui-mutdiff/extension/* \
+      ~/.vscode-server/extensions/jbdesarrollo.dsh-mutdiff-follow-0.1.0/
+# then: Developer: Reload Window
+```
+
+It installs into the **WSL remote** extension host, because that is where `127.0.0.1:3080` is the harness. See the extension's own [README](extension/README.md) for the settings, the commands, and the packaging alternative.
+
 ### What follow does not do
 
-- **It does not highlight a range.** The editor's CLI takes a file and a line and nothing more — no range, no decoration, no `preserveFocus` — so a reveal pauses on the line, and **every reveal raises the editor window**, the same caveat the automatic mode carries, now once per mutation. A VS Code extension could do better (highlight the changed range without stealing focus) at the cost of a second artifact the reader has to install; this plugin stays one package.
-- **It follows this harness process, not one conversation.** Every session in the process reveals its edits, subagents included, so a subagent editing another file will move the window there.
+- **It never raises a window by itself.** Not the feed, and not the extension: every automatic reveal preserves focus. The only paths that take it are the ones a reader asks for — the row's **Open in editor** click, and `MUTDIFF_FOLLOW=cli`, which is exactly the `code -r -g` fallback and documents that it will.
+- **It highlights the changed line, not the whole hunk.** The extension marks the line the mutation added; a range would need the hunk's added-line count carried through the feed.
+- **It follows this harness process, not one conversation.** Every session in the process publishes its edits, subagents included, so a subagent editing another file moves the reveal there.
 - **It follows tools, not the disk.** A `bash` command, a formatter, or an external process rewriting a file is invisible to it: the feed describes tool calls, not `inotify`. `edit` and `write` are what it covers.
 - **Reads are not followed.** The `read` tool's own metadata does carry an exact numbered window (`{path, offset, lines, totalLines}`), but following reads is a different feature with a different pacing — a window per read rather than a line per mutation — and it is deliberately not in this one.
 
@@ -158,7 +178,8 @@ The browser cannot launch a process, and no shipped client-reachable host capabi
 
 | route | body | answer |
 | --- | --- | --- |
-| `GET /mutdiff/state` | — | `{ok, editors: [{id, label}], effective, autoOpen, gotoLine}` |
+| `GET /mutdiff/state` | — | `{ok, editors: [{id, label}], effective, autoOpen, follow, followCli, subscribers, editorSubscribers, gotoLine}` |
+| `GET /mutdiff/activity` | — (Server-Sent Events; `?role=editor` to declare that the subscriber reveals, `?role=ui` to say it only draws) | a `hello` frame with the last location, then an `activity` frame per edit, and `ping` while idle |
 | `POST /mutdiff/open` | `{path, hint?, line?, editor?}` | `{ok: true, editor, line}` or `{ok: false, reason}` |
 
 The browser never names a program: the host picks the executable from its own table, so the payload cannot become an arbitrary command runner. The file itself is constrained too — absolute (with `~` expanded), free of control characters, an existing regular file after `realpath`, and, whenever any root is known, inside a registered workspace or a configured `roots` entry.
@@ -171,7 +192,9 @@ The browser never names a program: the host picks the executable from its own ta
 
 ### The follow engine
 
-Follow is a pure consumer of the event feed, and everything it depends on is a seam (`open`, `read`, `timer`, `now`), which is what lets the decision surface be driven in tests with no editor installed, no process spawned and no clock to wait on. Its one timer is the coalescing window: a burst in flight for one file becomes one editor call, and the row's unload drops whatever is still waiting rather than letting a timer outlive it.
+Follow is a pure consumer of the event feed, and everything it depends on is a seam (`open`, `publish`, `hasEditor`, `read`, `timer`, `now`), which is what lets the decision surface be driven in tests with no editor installed, no process spawned and no clock to wait on. Its one timer is the coalescing window: a burst in flight for one file becomes one published location, and the row's unload drops whatever is still waiting rather than letting a timer outlive it.
+
+**Publish, then decide about the CLI.** Every reveal publishes first — where the agent is working is true whether or not anyone is listening — and only then, if the run was asked for `cli` *and* no editor is connected to the feed, does it reach the editor's CLI. That order is the whole policy: the cheap, non-intrusive path is unconditional, and the one that raises a window needs both an explicit word and an absent editor. Two reveals never fight over the same caret.
 
 The line arithmetic is the part worth knowing about, because it is where the accuracy lives. `lineForProbe` locates an `edit`'s `old_string` before the mutation applies. `lineForDiff` locates the applied hunk's block — exactly, then by progressively shorter prefixes, then by its first non-blank line — and offsets into it by the index of the first line the hunk added, which comes from aligning `oldText` against `newText`. A block too large to align is capped, an unreadable or oversized file yields nothing, a change that cannot be found yields nothing, and a reveal the bridge refuses (outside the workspace, no editor) is not remembered as done, so the next event still tries.
 
@@ -184,6 +207,8 @@ The route spawns a process, so it is fenced the way DSH fences its own privilege
 Consequently the action is **loopback-only**: a browser reaching this harness over the LAN sees no button, exactly as it cannot use `host.openPath`. A file-open request is also deduplicated within 700 ms, so a double click opens one window.
 
 Live follow needs none of that fence, because nothing crosses a web boundary: the paths come from the session's own event log, which is the same trust level as the agent that wrote them, and a payload the browser cannot build cannot be forged. It does still pass the *same* validation on the way out — the file must exist, be a regular file, and live inside a registered workspace whenever any root is known — so a mutation outside the session's workspace reveals nothing rather than opening an editor for it.
+
+The activity feed is fenced with the same checks, for the reason that fence exists at all: a page that could subscribe to it would learn what the reader is editing. It is a stream rather than a document, so the JSON content-type rule cannot apply to a `GET` — the loopback `Host`, the `sec-fetch-site` and `Origin` checks do, and they are what a browser cannot forge. The plugin's own page subscribes same-origin; an editor extension subscribes from a process with no `Origin` at all. Neither names a program, and only one of the two is allowed to suppress the CLI fallback — hence the `role` parameter rather than a bare connection count.
 
 ### When the bridge is absent
 
@@ -302,11 +327,23 @@ curl -s -X POST http://127.0.0.1:3080/mutdiff/open \
 For live follow, start the run with the variable and watch the boot log:
 
 ```bash
-MUTDIFF=code MUTDIFF_FOLLOW=1 dsh web
-# [dsh-client-ui-mutdiff] live follow on (MUTDIFF_FOLLOW): every applied edit/write reveals its own line as it lands
+MUTDIFF_FOLLOW=1 dsh web
+# [dsh-client-ui-mutdiff] live follow on (MUTDIFF_FOLLOW): edits are published to every connected editor; no window is ever raised (use MUTDIFF_FOLLOW=cli to allow the CLI fallback)
 ```
 
-`/mutdiff/state` then answers `"follow":true` with `"autoOpen":false`, and having the agent `edit` a file moves the editor to the changed line as the mutation lands — with the row's own switch shown disabled in the picker, because the host is doing the opening.
+The feed itself can be watched with nothing but `curl`, which is also the quickest way to see whether an editor is attached:
+
+```bash
+curl -sN http://127.0.0.1:3080/mutdiff/activity | head -4
+# event: hello
+# data: {"ok":true,"last":null,"subscribers":1}
+curl -s http://127.0.0.1:3080/mutdiff/state
+# {"ok":true,"autoOpen":false,"follow":true,"followCli":false,...,"subscribers":0,"editorSubscribers":0,...}
+```
+
+Then have the agent `edit` a file: with the extension installed the line appears and is highlighted in place, with the window untouched. With `MUTDIFF_FOLLOW=cli` and no editor connected, the editor's CLI is launched instead — and that one does raise the window.
+
+`/mutdiff/state` reporting `subscribers: 0` while follow is on is the one thing worth checking when nothing seems to happen: it means no editor is attached, and with the default (publish-only) mode there is deliberately nobody else to reveal anything.
 
 If the boot fails instead, the browser console names the failing entry. A message mentioning `client-modules:` means the module graph rejected the bundle (a DSH API rename); a message mentioning `did not activate` means the entry itself failed: `import failed` for a module-resolution problem, or `pending (waiting for services: …)` for a service rename.
 
@@ -317,13 +354,23 @@ npm install
 npm test
 ```
 
+`npm test` runs both suites — the plugin's own `test/run.mjs`, and the extension's `extension/test.mjs`.
+
 `test/run.mjs` boots `lib/client.js` inside a stub module loader twice — once against the `0.1.1-rc.2` client surface and once against the `0.1.5-rc.2` one — asserts that the two keys are registered at a shadowing priority, and renders real rows (settled / running / errored, both block shapes) through React. Twelve scenarios cover the two client surfaces, the highlighted diff, the plain `DiffBlock` fallback, the fail-soft skip when no diff renderer is exposed, the integrity of the injected stylesheet, the editor action and the payload it posts (clicked through recorded jsx props, since the harness has no DOM), the auto-open decision and its stand-down under live follow, the host half — route registration, PATH detection, path/hint/line validation, the fence, the body contract and a real HTTP round trip — the follow engine on a manual clock (an applied hunk's exact line, a pre-apply probe, coalescing, the sticky window, non-mutation events, a file that cannot be read, a reveal the bridge refused, and `dispose`), and the precedence between an invocation variable, a stored browser choice and a host default. All of the above rides injectable seams, so no editor is installed and nothing is spawned.
 
-Two scenarios go further. When `@deepseek-ai/cordis` resolves (it does from inside a DSH profile tree), one drives the host row on a real cordis context and asserts the route arrives through scoped injection — including for a web server composed *after* the row — and another drives **live follow end to end**: a real event on the real context, through the real `apply`, reaching a real `spawn`, with a stand-in `code` shim on the PATH recording the argv it was handed. Otherwise both print a skip line. The suite also scrubs `MUTDIFF_*` from its own environment first: the plugin reads those from `process.env`, and a developer running `npm test` from inside the `dsh web` they started with `MUTDIFF=code` would otherwise get different answers than a clean shell. Pass a path to test another build (it must live in a package with `"type": "module"`, since the harness re-imports it per scenario):
+Two scenarios go further. When `@deepseek-ai/cordis` resolves (it does from inside a DSH profile tree), one drives the host row on a real cordis context and asserts the route arrives through scoped injection — including for a web server composed *after* the row — and another drives **live follow end to end**: a real event on the real context, through the real `apply`, a real HTTP subscriber attached to the activity feed reading real frames, and a real `spawn` for the explicit `cli` fallback, with a stand-in `code` shim on the PATH recording the argv it was handed. It asserts the thing the feature is built on: while an editor is subscribed, no process is spawned at all. Otherwise both print a skip line. The suite also scrubs `MUTDIFF_*` from its own environment first, since a developer running `npm test` from inside the `dsh web` they started with `MUTDIFF=code` was otherwise asserting against a different plugin than a clean shell would. Pass a path to test another build (it must live in a package with `"type": "module"`, since the harness re-imports it per scenario):
 
 ```bash
 node test/run.mjs /path/to/other/client.js
 ```
+
+The extension has its own suite, with its own stub editor, and needs no harness at all:
+
+```bash
+node extension/test.mjs
+```
+
+It proves what a test can: that a real activity frame from a real SSE stream ends in a `showTextDocument` call carrying `preserveFocus: true`, on the right line, in the right editor group — plus pause, quiet mode, a malformed frame, an unopenable file, and teardown. Whether a given window manager honors `preserveFocus` is a question only the desktop can answer, so that part is checked by eye once.
 
 Scenario E deserves a note: the bundle carries its CSS as one long JavaScript string literal. A stray unescaped quote in it ends the literal early — the module still parses, the markup is unchanged, and the browser silently receives a truncated stylesheet, so nothing but a check on the stylesheet itself catches it. It also fails when a rendered row uses a class the stylesheet does not define, which is why every new action class needs a rule.
 
@@ -334,8 +381,9 @@ Two limits are deliberate. The harness renders static markup, so effects never r
 ```
 package.json        # dsh.bundle + dsh.client declaration
 cordis.patch.yml    # mounts the plugin as a client entry (both halves ride one row)
-lib/index.js        # the host half: editor detection + the fenced /mutdiff route
+lib/index.js        # the host half: event feed, editor detection, the fenced /mutdiff routes
 lib/client.js       # the browser bundle: highlighted diff row and the editor action
+extension/          # the VS Code extension: preserveFocus reveal (its own package + test)
 test/run.mjs        # compatibility + contract suite (not published)
 docs/               # upstream notes (not published)
 ```
