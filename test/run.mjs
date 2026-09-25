@@ -16,7 +16,7 @@
  * Usage: node test/run.mjs [path/to/client.js]
  */
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -27,6 +27,18 @@ import { jsx, jsxs, Fragment } from "react/jsx-runtime";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const target = process.argv[2] === undefined ? resolve(here, "../lib/client.js") : resolve(process.argv[2]);
+
+/*
+ * This suite has to answer the same way whoever runs it. The plugin reads its
+ * invocation variables straight from `process.env`, and a developer running
+ * `npm test` from inside the very `dsh web` they started with `MUTDIFF=code`
+ * would otherwise get a different answer than a clean CI shell — the ambient
+ * variables would turn the automatic mode on underneath the scenarios that
+ * assert it is off. Every scenario that cares about the environment passes its
+ * own object, so scrubbing the ambient namespace here is what makes the rest of
+ * them deterministic.
+ */
+for (const name of Object.keys(process.env)) if (name.startsWith("MUTDIFF")) delete process.env[name];
 
 let importCounter = 0;
 /** Text of every stylesheet the bundle injected during the last import. */
@@ -696,6 +708,50 @@ async function scenarioEditorAction() {
 		assert.doesNotMatch(bareMarkup, /Open in editor/, "with no route there is no action to offer");
 		assert.match(bareMarkup, /data-open="true"/, "the stock diff row still renders");
 
+		// Live follow is the host opening every edit itself, so this page must keep
+		// its own automatic mode down even when the reader asked for it — otherwise
+		// one change opens two windows. The A/B below is the point: the stored
+		// preference is identical in both loads, and only `follow` differs.
+		const followLoad = async (follow) => {
+			const loaded = await loadFactory(target, { "dsh-client-ui-mutdiff:auto-open": "1" });
+			globalThis.fetch = (url) => String(url).endsWith("/state")
+				? answer({
+					ok: true,
+					autoOpen: follow ? false : true,
+					follow,
+					gotoLine: true,
+					configured: "code",
+					effective: "code",
+					autoOpenPinnedBy: null,
+					editors: [{ id: "code", label: "VS Code" }]
+				})
+				: answer({ ok: true });
+			const loadedExports = loaded(makeRequire({ primitives: makePrimitives({ strictLabels: true }).primitives, runtime: "missing", failures: [] }));
+			mount(loadedExports);
+			await settle();
+			return loadedExports;
+		};
+		const notFollowing = await followLoad(false);
+		assert.equal(notFollowing.__testing.bridgeState().autoOpen, true, "without follow, the reader's stored choice still stands");
+		const following = await followLoad(true);
+		assert.equal(following.__testing.bridgeState().follow, true, "the page learns that the host is following edits live");
+		assert.equal(following.__testing.bridgeState().autoOpen, false, "a stored auto-open preference loses to live follow, so one change cannot open two windows");
+		assert.equal(following.__testing.bridgeState().autoOpenPinnedBy, null, "follow is not a variable pin — the picker's note explains it instead");
+		assert.equal(following.__testing.openPlanFor({
+			autoOpen: following.__testing.bridgeState().autoOpen,
+			status: "ready",
+			state: "ok",
+			callId: "c-follow",
+			path: HUNK.path,
+			hint: "const a = 2;"
+		}), null, "so a settled mutation posts nothing from this page");
+		// The picker's note renders only inside the menu, which a static render
+		// cannot open (see the suite's limits); its text is asserted here against
+		// the bundle, where a renamed key or a dropped note would show up.
+		const bundle = readFileSync(target, "utf8");
+		assert.match(bundle, /mutdiff\.followNote/, "the picker's follow note key travels in the bundle");
+		assert.match(bundle, /Live follow is on/, "and its default text, so the disabled switch explains itself");
+
 		console.log("  ok  scenario F — editor action, picker, and posted payload");
 	} finally {
 		globalThis.fetch = originalFetch;
@@ -879,10 +935,11 @@ async function scenarioHostRoute() {
 	assert.deepEqual(defaults, {
 		editor: "auto",
 		autoOpen: false,
+		follow: false,
 		gotoLine: true,
 		roots: [],
 		openArgs: [],
-		sources: { editor: "default", autoOpen: "default", gotoLine: "default" },
+		sources: { editor: "default", autoOpen: "default", follow: "default", gotoLine: "default" },
 		autoOpenVariable: null
 	});
 	assert.equal(host.normalizeConfig({ editor: "   " }, none).editor, "auto", "a blank editor falls back to auto");
@@ -896,7 +953,7 @@ async function scenarioHostRoute() {
 	assert.equal(invoked.autoOpen, true, "MUTDIFF_AUTO_OPEN=1 turns auto-open on for this run");
 	assert.equal(invoked.editor, "windsurf");
 	assert.equal(invoked.gotoLine, false, "MUTDIFF_GOTO_LINE=0 asks for no line jump");
-	assert.deepEqual(invoked.sources, { editor: "env", autoOpen: "env", gotoLine: "env" });
+	assert.deepEqual(invoked.sources, { editor: "env", autoOpen: "env", follow: "default", gotoLine: "env" });
 	// the one-word form: naming MUTDIFF at all is the request
 	const word = (value) => host.normalizeConfig(undefined, { MUTDIFF: value });
 	assert.equal(word("code").editor, "code", "MUTDIFF=code names the editor");
@@ -911,6 +968,16 @@ async function scenarioHostRoute() {
 	assert.equal(host.normalizeConfig(undefined, {}).autoOpenVariable, null);
 	assert.equal(host.normalizeConfig(undefined, { MUTDIFF: "code", MUTDIFF_EDITOR: "zed" }).editor, "zed", "the spelled-out variable wins over the word");
 	assert.equal(host.normalizeConfig({ autoOpen: true }, { MUTDIFF: "0" }).autoOpen, false, "and the word wins over a row default");
+
+	// live follow: its own variable, its own source, and off unless it is asked for
+	assert.equal(host.normalizeConfig(undefined, {}).follow, false, "follow is opt-in like everything else");
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1" }).follow, true);
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1" }).sources.follow, "env");
+	assert.equal(host.normalizeConfig({ follow: true }, {}).follow, true, "a row default may turn it on");
+	assert.equal(host.normalizeConfig({ follow: true }, {}).sources.follow, "config");
+	assert.equal(host.normalizeConfig({ follow: true }, { MUTDIFF_FOLLOW: "0" }).follow, false, "and the invocation can turn it back off");
+	assert.equal(host.normalizeConfig({ follow: "yes" }, {}).follow, false, "only a real boolean or a variable turns it on");
+	assert.equal(host.normalizeConfig(undefined, { MUTDIFF: "code" }).follow, false, "the one-word form stays about auto-open");
 
 	for (const falsey of ["0", "false", "no", "off", ""]) {
 		assert.equal(host.normalizeConfig(undefined, { MUTDIFF_AUTO_OPEN: falsey }).autoOpen, false, `"${falsey}" means off`);
@@ -952,6 +1019,7 @@ async function scenarioHostRoute() {
 			assert.equal(state.ok, true);
 			assert.equal(state.effective, "code");
 			assert.equal(state.autoOpen, false, "auto-open is opt-in");
+			assert.equal(state.follow, false, "the browser is told whether the host is following edits live");
 			assert.equal(state.autoOpenPinnedBy, null, "nothing pinned it, so the picker owns the switch");
 			assert.deepEqual(state.editors, [{ id: "code", label: "VS Code" }]);
 
@@ -961,9 +1029,16 @@ async function scenarioHostRoute() {
 			assert.equal(opened.line, 3);
 			assert.deepEqual(launched[0], { command: codePath, args: ["-r", "-g", `${file}:3`], file });
 
+			// an explicit line — what live follow resolves against the applied diff —
+			// outranks the hint, and a nonsense one falls back to the hint path
+			assert.equal(bridge.open({ path: file, line: 2, hint: "const a = 2;" }).line, 2, "a line the host resolved itself wins over a text the browser picked out");
+			assert.deepEqual(launched.at(-1).args, ["-r", "-g", `${file}:2`]);
+			assert.equal(bridge.open({ path: file, line: 0, hint: "line two" }).line, 2, "a line that is not a positive integer is ignored");
+			assert.equal(bridge.open({ path: file, line: 2.5, hint: "line one" }).line, 1, "a fractional line is not a line");
+
 			// the same open within the dedupe window is a no-op, not a second window
 			assert.equal(bridge.open({ path: file, hint: "const a = 2;" }).deduped, true);
-			assert.equal(launched.length, 1, "a duplicate request must not spawn a second editor");
+			assert.equal(launched.length, 3, "a duplicate request must not spawn a second editor");
 
 			// no hint, or a hint the file no longer contains, degrades to the top of the file
 			assert.equal(bridge.open({ path: file }).line, 1);
@@ -977,7 +1052,7 @@ async function scenarioHostRoute() {
 			assert.equal(bridge.open({ path: "relative.ts" }).reason, "not-found", "a relative path is resolved against the harness cwd, where nothing by that name exists");
 			assert.equal(bridge.open({ path: relative(process.cwd(), resolve(here, "../lib/index.js")) }).reason, "outside-workspace", "a relative path that does resolve is still held to the root list");
 			assert.equal(bridge.open({ path: `${file}\nrm -rf /` }).reason, "bad-request");
-			assert.equal(launched.length, 2, "a refused open must not reach the process boundary");
+			assert.equal(launched.length, 3, "a refused open must not reach the process boundary");
 
 			// a run pinned by an invocation variable, whose editor the picker may still override per click
 			const pinnedBridge = host.createBridge({
@@ -996,6 +1071,27 @@ async function scenarioHostRoute() {
 			assert.equal(pinnedBridge.state().effective, "windsurf", "the invoked editor leads the roster");
 			assert.deepEqual(pinnedBridge.open({ path: file, editor: "code" }).args.slice(0, 2), ["-r", "-g"], "a click may still choose another editor");
 			assert.equal(launched.at(-1).command, codePath);
+
+			// live follow owns the automatic mode: the host opens every edit itself,
+			// so the page is told to keep its own auto-open off — one change must not
+			// open two windows — while still naming whatever pinned that switch
+			const following = host.createBridge({
+				config: host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1", MUTDIFF_AUTO_OPEN: "1" }),
+				detect: () => [{ id: "code", label: "VS Code", command: codePath, family: "code", path: codePath }],
+				launch: () => {},
+				roots: [root]
+			});
+			assert.equal(following.state().follow, true);
+			assert.equal(following.state().autoOpen, false, "the host is opening every edit itself, so the page must not");
+			assert.equal(following.state().autoOpenPinnedBy, "MUTDIFF_AUTO_OPEN", "the variable that pinned auto-open is still named");
+			const idle = host.createBridge({
+				config: host.normalizeConfig({ follow: true }),
+				detect: () => [{ id: "code", label: "VS Code", command: codePath, family: "code", path: codePath }],
+				launch: () => {},
+				roots: [root]
+			});
+			assert.equal(idle.state().follow, true, "a row default turns follow on without an invocation variable");
+			assert.equal(idle.state().autoOpen, false);
 
 			// a launch failure is reported, not thrown
 			const failing = host.createBridge({
@@ -1133,6 +1229,299 @@ async function scenarioHostFence() {
 	}
 }
 
+/* -------------------------------------------------------------------------- */
+/* scenario K — live follow: which event reveals what, and where               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The follow engine is the part of the plugin that decides, with no browser and
+ * no click, where the agent is working. It is driven here on a manual clock and
+ * a fake file store: a burst that coalesces into one spawn, a file already on
+ * the right line, an event that is not a mutation at all, and a hunk that has
+ * moved since it applied — each of which real timers and a real disk would make
+ * either slow or flaky.
+ */
+async function scenarioFollow() {
+	const host = await import(`${pathToFileURL(resolve(here, "../lib/index.js")).href}?scenario=${importCounter++}`);
+	const config = host.normalizeConfig(undefined, { MUTDIFF_FOLLOW: "1", MUTDIFF_EDITOR: "code" });
+
+	// The pure line arithmetic first, since everything below rides on it.
+	assert.equal(host.lineForProbe("one\ntwo\nthree\n", "three"), 3, "a probe resolves to the line it sits on");
+	// A probe the file does not contain reveals nothing rather than the top of
+	// the file: the applied diff lands a moment later with the real line, and a
+	// caret flung to line 1 and back is worse than a caret that never moved.
+	assert.equal(host.lineForProbe("one\ntwo\nthree\n", "a\nb"), undefined, "an absent probe reports nothing");
+	assert.equal(host.lineForProbe("one\ntwo\nthree\n", "  "), undefined, "a blank probe is not a probe");
+	assert.equal(host.lineForProbe("one\n  two  \nthree\n", "two"), 2, "a probe still matches through indentation");
+	// a multi-line probe is far more specific than a single line, which is the
+	// whole reason follow does not reuse the browser's one-line hint
+	assert.equal(host.lineForProbe("if (a) {\n  go()\n}\nif (a) {\n  stop()\n}\n", "if (a) {\n  stop()\n}"), 4, "a repeated first line does not fool a block match");
+	assert.equal(host.firstAddedIndex(["a", "b"], ["a", "x", "b"]), 1, "an inserted line is the first added line");
+	assert.equal(host.firstAddedIndex(["a", "b"], ["a", "b"]), 0, "a block with nothing added points at the block itself");
+	assert.equal(host.firstAddedIndex(["a", "b"], ["b"]), 0, "a removal-only hunk points at the hunk");
+	assert.equal(host.firstAddedIndex([], ["", "x"]), 1, "a new file points at its first line with content");
+	assert.equal(host.lineForDiff("one\ntwo\nTWO\nthree\n", { path: "f", oldText: "two\nthree", newText: "two\nTWO\nthree" }), 3, "the applied hunk resolves to the line it added");
+	assert.equal(host.lineForDiff("one\ntwo\nthree\n", { path: "f", oldText: null, newText: "one\ntwo\nthree" }), 1, "an overwrite points at its first line with content");
+	// A file that no longer contains the hunk verbatim still reports what it can
+	// prove — the block's first line — rather than an offset inside a block it
+	// could not match. A file containing none of the block reports nothing: the
+	// editor is not moved to the top of a file for a change it cannot find.
+	assert.equal(host.lineForDiff("a\nCHANGED\nb\n", { path: "f", oldText: "a\nx\nb", newText: "a\nX\nb" }), 1, "an approximate anchor reports the hunk's first line");
+	assert.equal(host.lineForDiff("nothing like it\n", { path: "f", oldText: "a\nb", newText: "a\nB\nb" }), undefined, "a file containing none of the block reports nothing");
+
+	// The metadata narrowing, mirrored from the tool that produces it.
+	assert.equal(host.diffsFromMeta(undefined), undefined, "absent meta is not a diff");
+	assert.equal(host.diffsFromMeta({ path: "f", offset: 1, lines: [] }), undefined, "another tool's meta is not a diff");
+	assert.equal(host.diffsFromMeta({ diffs: [] }), undefined, "an empty diff list is not a mutation");
+	assert.equal(host.diffsFromMeta({ diffs: [{ path: "f", oldText: 7, newText: "x" }] }), undefined, "a malformed hunk is dropped rather than trusted");
+	assert.deepEqual(host.diffsFromMeta({ diffs: [{ path: "f", oldText: null, newText: "x", extra: 1 }] }).length, 1);
+
+	// A manual clock, so "coalesce" and "sticky" are assertions rather than sleeps.
+	const timers = new Map();
+	let timerId = 0;
+	const timer = {
+		set(callback) {
+			timerId += 1;
+			timers.set(timerId, callback);
+			return timerId;
+		},
+		clear(id) {
+			timers.delete(id);
+		}
+	};
+	/** Run every waiting burst, oldest first. Returns how many there were. */
+	const fire = () => {
+		const due = [...timers.entries()];
+		timers.clear();
+		for (const [, callback] of due) callback();
+		return due.length;
+	};
+	let clock = 1_000_000;
+	/**
+	 * The files the engine reads, and a mutation helper: the tool writes the file
+	 * first and the event lands after, so every case below applies its hunk to the
+	 * store before handing the event over — which is what makes the line numbers
+	 * asserted here the ones an editor would really be sent to.
+	 */
+	const store = new Map([
+		["/w/main.ts", "one\ntwo\nthree\nfour\n"],
+		["/w/burst.ts", "alpha\nbeta\ngamma\n"],
+		["/w/probe.ts", "x\ny\nz\n"]
+	]);
+	const applied = (path, oldText, newText) => {
+		const text = store.get(path) ?? "";
+		const index = oldText === null ? -1 : text.indexOf(oldText);
+		if (oldText === null) store.set(path, newText);
+		else if (index >= 0) store.set(path, `${text.slice(0, index)}${newText}${text.slice(index + oldText.length)}`);
+		return { path, oldText, newText };
+	};
+	const revealed = [];
+	const follower = host.createFollower({
+		config,
+		open: (payload) => {
+			revealed.push(payload);
+			return { ok: true, line: payload.line };
+		},
+		read: (file) => store.get(file),
+		timer,
+		now: () => clock,
+		coalesceMs: 150,
+		stickyMs: 1500
+	});
+	const result = (meta) => ({ type: "tool/result", seq: 1, time: clock, data: { turn: 1, step: 1, message: {}, meta } });
+	const call = (name, args) => ({ type: "tool/call", seq: 2, time: clock, data: { turn: 1, step: 1, callId: "c1", name, arguments: JSON.stringify(args) } });
+
+	// An applied diff reveals its own line — after the burst window, not before.
+	follower.handle({}, result({ diffs: [applied("/w/main.ts", "two\nthree", "two\nTWO\nthree")] }));
+	assert.deepEqual(revealed, [], "a reveal waits out the coalescing window");
+	assert.equal(fire(), 1, "exactly one burst was scheduled");
+	assert.deepEqual(revealed, [{ path: "/w/main.ts", line: 3 }], "the caret lands on the line the hunk added, not the hunk's first context line");
+
+	// The same line again is not worth raising the window for…
+	follower.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: "two\nthree", newText: "two\nTWO\nthree" }] }));
+	fire();
+	assert.equal(revealed.length, 1, "a file already sitting on that line is not re-opened");
+	// …but a later edit to the same line is a real move, once the window has passed.
+	clock += 2_000;
+	follower.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: "two\nthree", newText: "two\nTWO\nthree" }] }));
+	fire();
+	assert.equal(revealed.length, 2, "the sticky window expires");
+
+	// A burst in one file is one spawn carrying the last line it reached.
+	clock += 2_000;
+	follower.handle({}, result({ diffs: [applied("/w/burst.ts", "alpha", "alpha\nA1")] }));
+	follower.handle({}, result({ diffs: [applied("/w/burst.ts", "gamma", "GAMMA")] }));
+	assert.equal(fire(), 1, "two mutations in flight coalesce into one burst");
+	assert.deepEqual(revealed.at(-1), { path: "/w/burst.ts", line: 4 }, "the burst carries the newest line, not the first");
+
+	// Two files in one result are two reveals: they are different tabs.
+	clock += 2_000;
+	follower.handle({}, result({
+		diffs: [
+			applied("/w/main.ts", "four", "FOUR"),
+			applied("/w/burst.ts", "beta", "BETA")
+		]
+	}));
+	assert.equal(fire(), 2, "one reveal per file, not one per event");
+	assert.deepEqual(revealed.slice(-2), [{ path: "/w/main.ts", line: 5 }, { path: "/w/burst.ts", line: 3 }]);
+
+	// `edit` reveals before it applies: its probe is on disk already.
+	clock += 2_000;
+	follower.handle({}, call("edit", { file_path: "/w/probe.ts", old_string: "y", new_string: "Y" }));
+	fire();
+	assert.deepEqual(revealed.at(-1), { path: "/w/probe.ts", line: 2 }, "an edit's old_string locates the line it is about to change");
+	// `write` has no probe on disk, and a call whose arguments are still
+	// streaming is not parseable: both wait for the applied diff instead.
+	follower.handle({}, call("write", { file_path: "/w/probe.ts", content: "nope" }));
+	assert.equal(fire(), 0, "a write has nothing on disk to locate until it lands");
+	follower.handle({}, { type: "tool/call", seq: 3, time: clock, data: { turn: 1, step: 1, callId: "c2", name: "edit", arguments: '{"file_path":"/w/probe.ts","old_str' } });
+	assert.equal(fire(), 0, "arguments still arriving are unparseable JSON, not a location");
+	// A probe the file no longer matches is the same kind of nothing: the applied
+	// diff is the trigger that follows, and it knows the real line.
+	follower.handle({}, call("edit", { file_path: "/w/probe.ts", old_string: "a line that is not there", new_string: "x" }));
+	assert.equal(fire(), 0, "a probe the file does not contain reveals nothing, rather than line 1");
+
+	// Only mutations count: a read's own meta, a chunk, and a turn boundary are not lines.
+	clock += 2_000;
+	follower.handle({}, { type: "assistant/chunk", seq: 4, time: clock, data: { turn: 1, step: 1, chunk: {} } });
+	follower.handle({}, result({ path: "/w/probe.ts", offset: 1, lines: [{ number: 1, text: "x" }], totalLines: 3 }));
+	follower.handle({}, result(null));
+	assert.equal(fire(), 0, "nothing but an applied file mutation counts");
+
+	// A file the feed names but the reader cannot open is skipped, not guessed at.
+	follower.handle({}, result({ diffs: [{ path: "/w/gone.ts", oldText: null, newText: "x" }] }));
+	assert.equal(fire(), 0, "an unreadable file schedules nothing");
+
+	// A reveal the bridge refused (outside the workspace, no editor) does not
+	// become the sticky line, so the next event still tries.
+	const refusing = host.createFollower({
+		config,
+		open: () => ({ ok: false, reason: "outside-workspace" }),
+		read: (file) => store.get(file),
+		timer,
+		now: () => clock
+	});
+	refusing.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: "four", newText: "FOUR" }] }));
+	fire();
+	assert.equal(fire(), 0, "a refused reveal leaves nothing waiting");
+	refusing.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: "four", newText: "FOUR" }] }));
+	assert.equal(fire(), 1, "and it is retried rather than remembered as done");
+	fire();
+
+	// Follow off is the default: the same feed reveals nothing at all.
+	const off = host.createFollower({ config: host.normalizeConfig(undefined, {}), open: () => ({ ok: true }), read: () => "x", timer, now: () => clock });
+	off.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: null, newText: "x" }] }));
+	assert.equal(fire(), 0, "follow does nothing unless it was asked for");
+
+	// A waiting burst is dropped when the row unloads.
+	follower.handle({}, result({ diffs: [{ path: "/w/main.ts", oldText: "four", newText: "FOUR" }] }));
+	assert.equal(timers.size, 1, "the burst is waiting");
+	follower.dispose();
+	assert.equal(timers.size, 0, "dispose drops it, so a timer cannot outlive the row");
+
+	console.log("  ok  scenario K — live follow: events, lines, coalescing, and the sticky window");
+}
+
+/* -------------------------------------------------------------------------- */
+/* scenario L — live follow end to end, through the row and a real spawn        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Scenario K drives the engine through its seams, and scenarios H/I drive the
+ * bridge the same way. This one drives the *row*: a real cordis context, the
+ * real `apply`, a real session event, and a real `spawn` — with a stand-in
+ * `code` shim on the PATH recording its argv, since asserting on a real editor
+ * window is not something a test can do.
+ *
+ * It is the only scenario that crosses the process boundary, and it is the only
+ * one that can catch what the seams cannot: a listener that never reaches the
+ * engine, a config field the row drops, or an argv shape the editor would
+ * reject.
+ */
+async function scenarioFollowWiring() {
+	let cordis;
+	try {
+		cordis = await import("@deepseek-ai/cordis");
+	} catch {
+		console.log("  --  scenario L — skipped: @deepseek-ai/cordis is not resolvable here (run this suite from inside a DSH profile to exercise it)");
+		return;
+	}
+	const host = await import(`${pathToFileURL(resolve(here, "../lib/index.js")).href}?scenario=${importCounter++}`);
+	const root = mkdtempSync(join(tmpdir(), "mutdiff-live-"));
+	const bin = join(root, "bin");
+	mkdirSync(bin);
+	const record = join(root, "argv.txt");
+	const file = join(root, "app.ts");
+	writeFileSync(file, "one\ntwo\nthree\n");
+	writeFileSync(join(bin, "code"), `#!/bin/sh\nprintf '%s\\n' "$@" > ${record}\n`);
+	chmodSync(join(bin, "code"), 0o755);
+	const previousPath = process.env.PATH;
+	process.env.PATH = bin;
+	try {
+		const context = new cordis.Context();
+		context.provide("webServer", { register: () => () => {} });
+		context.plugin(host, { follow: true, editor: "code" });
+		await settle();
+
+		// The event a `write`/`edit` tool result carries: path plus applied hunk.
+		// The tool writes the file first and the event lands after, so the file on
+		// disk is the post-apply text by the time the row sees the hunk.
+		writeFileSync(file, "one\nTWO\ntwo\nthree\n");
+		context.emit("session/event", {}, {
+			type: "tool/result",
+			seq: 1,
+			time: Date.now(),
+			data: {
+				turn: 1,
+				step: 1,
+				message: { role: "tool" },
+				meta: { diffs: [{ path: file, oldText: "one\ntwo", newText: "one\nTWO\ntwo" }] }
+			}
+		});
+
+		const argv = await waitForLines(record, 4_000);
+		assert.deepEqual(argv, ["-r", "-g", `${file}:2`], "the row follows a real event to a real editor launch, on the line the hunk added");
+
+		// Follow is off unless the row is configured for it: the same event then
+		// reaches a listener that does nothing, and no process is spawned.
+		const quietRoot = join(root, "quiet");
+		mkdirSync(quietRoot);
+		const quietFile = join(quietRoot, "app.ts");
+		writeFileSync(quietFile, "one\ntwo\n");
+		const quietRecord = join(quietRoot, "argv.txt");
+		const quiet = new cordis.Context();
+		quiet.provide("webServer", { register: () => () => {} });
+		quiet.plugin(host, { editor: "code" });
+		await settle();
+		quiet.emit("session/event", {}, {
+			type: "tool/result",
+			seq: 1,
+			time: Date.now(),
+			data: { turn: 1, step: 1, message: {}, meta: { diffs: [{ path: quietFile, oldText: "one\n", newText: "one\n" }] } }
+		});
+		await new Promise((done) => { setTimeout(done, 400); });
+		assert.equal(existsSync(quietRecord), false, "an unconfigured row follows nothing");
+
+		console.log("  ok  scenario L — live follow end to end: the row, a real event, and a real spawn");
+	} finally {
+		process.env.PATH = previousPath;
+		rmSync(root, { recursive: true, force: true });
+	}
+}
+
+/** Poll for a file of recorded lines, and return them; fails loudly on timeout. */
+async function waitForLines(file, timeoutMs) {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		if (existsSync(file)) {
+			const text = readFileSync(file, "utf8");
+			if (text.trim() !== "") return text.split("\n").filter((line) => line !== "");
+		}
+		if (Date.now() > deadline) assert.fail(`the editor was never launched: ${file} stayed empty`);
+		await new Promise((done) => { setTimeout(done, 25); });
+	}
+}
+
 console.log(`dsh-client-ui-mutdiff compatibility suite\n  target: ${target}`);
 await scenario015();
 await scenario011();
@@ -1143,6 +1532,8 @@ await scenarioEditorAction();
 await scenarioAutoOpen();
 await scenarioHostRoute();
 await scenarioHostFence();
+await scenarioFollow();
+await scenarioFollowWiring();
 /* -------------------------------------------------------------------------- */
 /* scenario J — the host half against a real cordis context                    */
 /* -------------------------------------------------------------------------- */

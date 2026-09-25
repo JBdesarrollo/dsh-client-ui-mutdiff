@@ -1,7 +1,7 @@
 {
   "name": "@jbdesarrollo/dsh-client-ui-mutdiff",
-  "description": "DeepSeek Harness client plugin: write/edit diffs expanded by default and untruncated in the agent chat, with a one-click open-in-editor bridge.",
-  "version": "0.3.3",
+  "description": "DeepSeek Harness client plugin: write/edit diffs expanded by default and untruncated in the agent chat, with live follow-in-editor (real-time, line-accurate) and a one-click open-in-editor bridge.",
+  "version": "0.4.0",
   "publishConfig": {
     "access": "public"
   },
